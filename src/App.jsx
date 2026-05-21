@@ -157,9 +157,7 @@ function SheetSVG({ sheet, maxW = 360 }) {
   )
 }
 
-function CutSequence({ sheet }) {
-  const xCuts = new Set(), yCuts = new Set()
-  sheet.pieces.forEach(p => { if (p.x > 0) xCuts.add(p.x); if (p.x + p.pw < sheet.width) xCuts.add(p.x + p.pw); if (p.y > 0) yCuts.add(p.y); if (p.y + p.ph < sheet.height) yCuts.add(p.y + p.ph) })
+
   const steps = [...[...xCuts].sort((a, b) => a - b).map(x => ({ tipo: "Corte vertical", val: `${x} mm` })), ...[...yCuts].sort((a, b) => a - b).map(y => ({ tipo: "Corte horizontal", val: `${y} mm` })), ...sheet.pieces.map(p => ({ tipo: "Separar peça", val: `${p.ref?.origW ?? p.pw - 4}×${p.ref?.origH ?? p.ph - 4} mm` }))]
   return (<div style={{ display: "flex", flexDirection: "column", gap: 7 }}>{steps.map((c, i) => (<div key={i} style={{ display: "flex", alignItems: "center", gap: 10 }}><div style={{ width: 22, height: 22, borderRadius: "50%", background: T.green, color: "#fff", fontSize: 10, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{i + 1}</div><span style={{ fontSize: 13, color: T.textMid, flex: 1 }}>{c.tipo}</span><span style={{ fontSize: 13, fontWeight: 600, color: T.green, fontFamily: "monospace" }}>{c.val}</span></div>))}{steps.length === 0 && <div style={{ color: T.textMuted, fontSize: 13 }}>Sem cortes.</div>}</div>)
 }
@@ -313,9 +311,99 @@ function NewOptimization({ data, setData, navigate, pecasPreenchidas }) {
       const disponiveis = data.chapas.filter(c => c.cor === cor && c.quantidade > 0)
       const chapa = disponiveis.reduce((best, c) => (!best || c.largura * c.altura > best.largura * best.altura) ? c : best, null)
       if (!chapa) { setError(`Sem chapas de ${COR[cor]?.label} em estoque.`); setLoading(false); return }
-      const sheets = runOptimization(valid, int(chapa.largura), int(chapa.altura))
-      if (!sheets.length) { setError("Nenhuma peça coube na chapa. Verifique as medidas."); setLoading(false); return }
-      setSheetInfo(chapa); setResult(sheets); setCurrentSheet(0); setCortadas(new Set()); setStep(4); setLoading(false)
+
+      // ── Retalhos disponíveis da mesma cor ──────────────────────────────────
+      const retalhosDaCor = data.retalhos.filter(r => r.status === "ativo" && r.cor === cor)
+        .sort((a, b) => b.largura * b.altura - a.largura * a.altura) // maiores primeiro
+
+      // ── Distribui peças: tenta retalhos antes de chapas novas ─────────────
+      const allSheets = []
+      let remaining = []
+
+      // Expande peças com +4mm
+      const pecasExpanded = []
+      valid.forEach(p => {
+        const W = int(p.largura), H = int(p.altura), Q = int(p.quantidade)
+        if (!W || !H || !Q) return
+        for (let i = 0; i < Q; i++) pecasExpanded.push({ w: W + 4, h: H + 4, origW: W, origH: H })
+      })
+      pecasExpanded.sort((a, b) => b.w * b.h - a.w * a.h)
+
+      let toPlace = [...pecasExpanded]
+
+      // Tenta cada retalho disponível
+      for (const retalho of retalhosDaCor) {
+        if (toPlace.length === 0) break
+        const rW = int(retalho.largura), rH = int(retalho.altura)
+        // Verifica se alguma peça cabe neste retalho
+        const cabem = toPlace.filter(p => (p.w <= rW && p.h <= rH) || (p.h <= rW && p.w <= rH))
+        if (cabem.length === 0) continue
+
+        const { placed, notPlaced: naoCouberam, freeRects } = packOneSheet(cabem, rW, rH)
+        if (placed.length === 0) continue
+
+        const usedArea = placed.reduce((s, p) => s + p.pw * p.ph, 0)
+        const totalArea = rW * rH
+        const eff = (usedArea / totalArea) * 100
+        const scraps = freeRects.filter(r => r.w >= 10 && r.h >= 10)
+        const mainScrap = scraps.reduce((best, r) => (!best || r.w * r.h > best.w * best.h) ? r : best, null)
+
+        allSheets.push({
+          id: allSheets.length + 1,
+          width: rW, height: rH,
+          pieces: placed,
+          freeRects: scraps,
+          mainScrap,
+          efficiency: Math.round(eff * 10) / 10,
+          usedArea, totalArea,
+          waste: totalArea - usedArea,
+          errors: validateSheet(placed, rW, rH),
+          isRetalho: true,
+          retalhoId: retalho.id,
+          retalhoLabel: `Retalho ${rW}×${rH}`,
+        })
+
+        // Remove peças já alocadas do toPlace
+        const placedRefs = new Set(placed.map(p => p.ref))
+        const cabemIds = new Set(cabem)
+        toPlace = toPlace.filter(p => {
+          if (!cabemIds.has(p)) return true
+          const idx = placed.findIndex(pl => pl.ref === p)
+          return idx === -1
+        })
+        // Simpler: rebuild toPlace = pieces not placed in this sheet
+        const placedPieces = placed.map(p => p.ref)
+        const notInSheet = [...naoCouberam]
+        // pieces that were candidates but not placed
+        toPlace = toPlace.filter(p => !placedPieces.includes(p)).concat(notInSheet.filter(p => !toPlace.includes(p)))
+      }
+
+      // Peças restantes vão para chapas novas
+      if (toPlace.length > 0) {
+        let remainingForSheets = [...toPlace]
+        while (remainingForSheets.length > 0) {
+          const { placed, notPlaced, freeRects } = packOneSheet(remainingForSheets, int(chapa.largura), int(chapa.altura))
+          if (placed.length === 0) break
+          const usedArea = placed.reduce((s, p) => s + p.pw * p.ph, 0)
+          const totalArea = int(chapa.largura) * int(chapa.altura)
+          const eff = (usedArea / totalArea) * 100
+          const scraps = freeRects.filter(r => r.w >= 10 && r.h >= 10)
+          const mainScrap = scraps.reduce((best, r) => (!best || r.w * r.h > best.w * best.h) ? r : best, null)
+          allSheets.push({
+            id: allSheets.length + 1,
+            width: int(chapa.largura), height: int(chapa.altura),
+            pieces: placed, freeRects: scraps, mainScrap,
+            efficiency: Math.round(eff * 10) / 10,
+            usedArea, totalArea, waste: totalArea - usedArea,
+            errors: validateSheet(placed, int(chapa.largura), int(chapa.altura)),
+            isRetalho: false,
+          })
+          remainingForSheets = notPlaced
+        }
+      }
+
+      if (!allSheets.length) { setError("Nenhuma peça coube na chapa. Verifique as medidas."); setLoading(false); return }
+      setSheetInfo(chapa); setResult(allSheets); setCurrentSheet(0); setCortadas(new Set()); setStep(4); setLoading(false)
     }, 600)
   }
 
@@ -404,11 +492,16 @@ function NewOptimization({ data, setData, navigate, pecasPreenchidas }) {
               <div><div style={{ fontSize: 15, fontWeight: 700, color: T.greenDark }}>Otimização concluída!</div><div style={{ fontSize: 12, color: T.greenDark }}>{result.length} chapa(s) · {result.reduce((t, sh) => t + sh.pieces.length, 0)} peças · {sheetInfo?.largura}×{sheetInfo?.altura} mm</div></div>
             </div>
             <div style={{ display: "flex", gap: 8, marginBottom: 14, overflowX: "auto", paddingBottom: 4 }}>
-              {result.map((sh, i) => (<button key={i} onClick={() => setCurrentSheet(i)} style={{ padding: "8px 14px", borderRadius: 10, border: `2px solid ${currentSheet === i ? T.green : T.border}`, background: currentSheet === i ? T.green : T.card, color: currentSheet === i ? "#fff" : T.textMid, fontSize: 13, fontWeight: 700, cursor: "pointer", flexShrink: 0, minWidth: 80, textAlign: "center" }}>Chapa {i + 1}<div style={{ fontSize: 10 }}>{sh.efficiency}%</div></button>))}
+              {result.map((sh, i) => (<button key={i} onClick={() => setCurrentSheet(i)} style={{ padding: "8px 14px", borderRadius: 10, border: `2px solid ${currentSheet === i ? (sh.isRetalho ? T.amber : T.green) : T.border}`, background: currentSheet === i ? (sh.isRetalho ? T.amber : T.green) : T.card, color: currentSheet === i ? "#fff" : T.textMid, fontSize: 13, fontWeight: 700, cursor: "pointer", flexShrink: 0, minWidth: 80, textAlign: "center" }}>{sh.isRetalho ? "📦 Retalho" : `Chapa ${i + 1}`}<div style={{ fontSize: 10 }}>{sh.efficiency}%</div></button>))}
             </div>
             <div style={{ background: T.dark, borderRadius: 14, padding: "14px 14px", marginBottom: 12 }}>
               <div style={{ display: "flex", justifyContent: "space-between", color: "#9CA3AF", fontSize: 12, marginBottom: 10 }}>
-                <span>Chapa {currentSheet + 1} de {result.length} · {s.width}×{s.height} mm</span>
+                <span>
+                  {s.isRetalho
+                    ? <span style={{ color: "#FCD34D", fontWeight: 700 }}>📦 {s.retalhoLabel}</span>
+                    : <span>Chapa {currentSheet + 1} de {result.length} · {s.width}×{s.height} mm</span>
+                  }
+                </span>
                 <span style={{ color: cortadas.has(currentSheet) ? T.green : T.amber, fontWeight: 700 }}>{cortadas.has(currentSheet) ? "✓ Cortada" : "Pendente"}</span>
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8, marginBottom: 12 }}>
@@ -421,10 +514,7 @@ function NewOptimization({ data, setData, navigate, pecasPreenchidas }) {
                 <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "#9CA3AF" }}><div style={{ width: 14, height: 10, background: "#2D3B2D", border: "1.5px dashed #4B5563", borderRadius: 2 }} /> Sobra / Borda</div>
               </div>
             </div>
-            <div style={{ background: T.card, borderRadius: 14, padding: 16, marginBottom: 12, boxShadow: "0 1px 3px rgba(0,0,0,0.07)" }}>
-              <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 12 }}>Sequência de corte — Chapa {currentSheet + 1}</div>
-              <CutSequence sheet={s} />
-            </div>
+
             {s.mainScrap && (<div style={{ background: T.card, borderRadius: 14, padding: 16, marginBottom: 16, boxShadow: "0 1px 3px rgba(0,0,0,0.07)" }}><div style={{ fontSize: 14, fontWeight: 700, marginBottom: 10 }}>Maior retalho — Chapa {currentSheet + 1}</div><div style={{ display: "flex", gap: 12, alignItems: "center" }}><div style={{ width: 44, height: 54, background: T.greenLight, border: `2px dashed ${T.green}`, borderRadius: 6, flexShrink: 0 }} /><div><div style={{ fontSize: 16, fontWeight: 700, fontFamily: "monospace" }}>{Math.round(s.mainScrap.w)} × {Math.round(s.mainScrap.h)} mm</div><div style={{ fontSize: 12, color: T.textMuted }}>Área: {area_m2(s.mainScrap.w, s.mainScrap.h)} m²</div><div style={{ fontSize: 12, color: T.green, fontWeight: 600 }}>Salvo em Retalhos ao finalizar</div></div></div></div>)}
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
               {currentSheet > 0 && <Btn onClick={() => setCurrentSheet(i => i - 1)} variant="ghost" size="sm" icon={<ChevronLeft size={16} />}>Anterior</Btn>}
