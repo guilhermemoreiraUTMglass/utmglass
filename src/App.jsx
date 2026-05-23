@@ -955,301 +955,507 @@ function NewOptimization({data,setData,navigate,pecasPreenchidas}){
   )
 }
 
-// ══════════════════════════════════════════════════════
-// OTIMIZAÇÃO MANUAL ASSISTIDA
-// ══════════════════════════════════════════════════════
-function ManualOptimization({data,setData,navigate,retalhoBase}){
-  const[step,setStep]=useState(retalhoBase?"editing":"select-base")
-  const[base,setBase]=useState(retalhoBase?{type:"retalho",width:int(retalhoBase.largura),height:int(retalhoBase.altura),id:retalhoBase.id,cor:retalhoBase.cor}:null)
-  const[cor,setCor]=useState(retalhoBase?.cor||"incolor")
-  const[pecas,setPecas]=useState([{id:uid(),largura:"",altura:"",quantidade:"",rotation:0}])
-  const[layout,setLayout]=useState(null)
-  const[selectedIdx,setSelectedIdx]=useState(null)
-  const[editingPeca,setEditingPeca]=useState(null)
-  const[form,setForm]=useState({largura:"",altura:"",quantidade:"",rotation:0})
-  const[zoomSheet,setZoomSheet]=useState(null)
-  const[cortadas,setCortadas]=useState(new Set())
-  const[finalizing,setFinalizing]=useState(false)
-  const[manualW,setManualW]=useState("")
-  const[manualH,setManualH]=useState("")
-  const isMobile=useIsMobile()
+// ══════════════════════════════════════════════════════════════
+// MOTOR DE CORTE INDUSTRIAL — Guillotine Real
+// Regras:
+//  - Ponto zero = canto inferior esquerdo
+//  - Y = largura (horizontal), X = altura (vertical)
+//  - Peças crescem de baixo para cima
+//  - qtyY = duplica para o lado (horizontal)
+//  - qtyX = duplica para cima (vertical)
+//  - Todo corte é borda a borda dentro da zona
+//  - Retalho >= 300x300 = aproveitável, abaixo = sucata
+// ══════════════════════════════════════════════════════════════
+const SCRAP_MIN = 300
 
-  // Re-otimizar em tempo real quando peças mudam
-  useEffect(()=>{
-    if(!base)return
-    const valid=pecas.filter(p=>int(p.largura)>0&&int(p.altura)>0&&int(p.quantidade)>0)
-    if(!valid.length){setLayout(null);return}
-    const all=[]
-    valid.forEach(p=>{
-      const W=int(p.largura)+4,H=int(p.altura)+4,Q=int(p.quantidade)
-      for(let i=0;i<Q;i++){
-        const rot=p.rotation===90
-        all.push({w:rot?H:W,h:rot?W:H,origW:int(p.largura),origH:int(p.altura),pid:p.id})
+function buildCutLayout(entries, sheetW, sheetH) {
+  const pieces = []
+  const reusable = []
+  const waste = []
+
+  // Zonas disponíveis: {x0=posY, y0=posX, w=largura, h=altura}
+  let zones = [{ x0: 0, y0: 0, w: sheetW, h: sheetH }]
+
+  for (const entry of entries) {
+    if (!zones.length) break
+
+    const pieceW = int(entry.y)  // largura com acréscimo
+    const pieceH = int(entry.x)  // altura com acréscimo
+    const qtyY = Math.max(1, int(entry.qtyY) || 1)
+    const qtyX = Math.max(1, int(entry.qtyX) || 1)
+    const totalW = pieceW * qtyY
+    const totalH = pieceH * qtyX
+
+    // Encontra primeira zona que cabe
+    const zIdx = zones.findIndex(z => z.w >= totalW && z.h >= totalH)
+    if (zIdx === -1) continue
+
+    const zone = zones.splice(zIdx, 1)[0]
+
+    // Adiciona peças na grade qtyY (lado) x qtyX (cima)
+    for (let ix = 0; ix < qtyX; ix++) {
+      for (let iy = 0; iy < qtyY; iy++) {
+        pieces.push({
+          posY: zone.x0 + iy * pieceW,
+          posX: zone.y0 + ix * pieceH,
+          w: pieceW,
+          h: pieceH,
+          origY: entry.origY,
+          origX: entry.origX,
+          entryId: entry.id,
+        })
       }
-    })
-    all.sort((a,b)=>b.w*b.h-a.w*a.h)
-    const{placed,notPlaced,freeRects}=packOneSheet(all,base.width,base.height)
-    const sheet=buildSheet(placed,freeRects,base.width,base.height,{isRetalho:base.type==="retalho"})
-    setLayout(sheet)
-  },[pecas,base])
-
-  const addPeca=()=>{
-    if(!int(form.largura)||!int(form.altura)||!int(form.quantidade))return
-    if(editingPeca){
-      setPecas(p=>p.map(x=>x.id===editingPeca?{...x,...form}:x))
-      setEditingPeca(null)
-    }else{
-      setPecas(p=>[...p,{id:uid(),...form}])
     }
-    setForm({largura:"",altura:"",quantidade:"",rotation:0})
-    setSelectedIdx(null)
+
+    const usedW = totalW
+    const usedH = totalH
+    const remW = zone.w - usedW
+    const remH = zone.h - usedH
+
+    // Zona à direita (sobra Y)
+    if (remW > 0 && zone.h > 0) {
+      const z = { x0: zone.x0 + usedW, y0: zone.y0, w: remW, h: zone.h }
+      if (remW >= SCRAP_MIN && zone.h >= SCRAP_MIN) reusable.push({ posY: z.x0, posX: z.y0, w: z.w, h: z.h })
+      else waste.push({ posY: z.x0, posX: z.y0, w: z.w, h: z.h })
+      zones.push(z)
+    }
+
+    // Zona acima (sobra X) — somente na largura usada
+    if (remH > 0 && usedW > 0) {
+      const z = { x0: zone.x0, y0: zone.y0 + usedH, w: usedW, h: remH }
+      if (usedW >= SCRAP_MIN && remH >= SCRAP_MIN) reusable.push({ posY: z.x0, posX: z.y0, w: z.w, h: z.h })
+      else waste.push({ posY: z.x0, posX: z.y0, w: z.w, h: z.h })
+      zones.push(z)
+    }
   }
 
-  const deletePeca=id=>{
-    setPecas(p=>p.filter(x=>x.id!==id))
-    setSelectedIdx(null)
+  // Zonas restantes
+  for (const z of zones) {
+    if (!z.w || !z.h) continue
+    if (z.w >= SCRAP_MIN && z.h >= SCRAP_MIN) reusable.push({ posY: z.x0, posX: z.y0, w: z.w, h: z.h })
+    else waste.push({ posY: z.x0, posX: z.y0, w: z.w, h: z.h })
   }
 
-  const startEdit=idx=>{
-    if(!layout)return
-    const placed=layout.pieces[idx]
-    const pid=placed.ref?.pid
-    const peca=pecas.find(p=>p.id===pid)
-    if(!peca)return
-    setForm({largura:peca.largura,altura:peca.altura,quantidade:peca.quantidade,rotation:peca.rotation||0})
-    setEditingPeca(peca.id)
-    setSelectedIdx(null)
-  }
+  const usedArea = pieces.reduce((s, p) => s + p.w * p.h, 0)
+  const totalArea = sheetW * sheetH
+  return { pieces, reusable, waste, usedArea, totalArea, eff: Math.round((usedArea / totalArea) * 1000) / 10 }
+}
 
-  const handleSelectBase=(type,item)=>{
-    if(type==="chapa"){setBase({type:"chapa",width:int(item.largura),height:int(item.altura)});setCor(item.cor)}
-    else if(type==="retalho"){setBase({type:"retalho",width:int(item.largura),height:int(item.altura),id:item.id});setCor(item.cor)}
-    else{const W=int(manualW),H=int(manualH);if(!W||!H)return;setBase({type:"manual",width:W,height:H})}
-    setStep("editing")
-  }
+// ── SVG Mapa de corte industrial ──
+function CutMapSVG({ layout, sheetW, sheetH, cor, maxW, onZoom }) {
+  const W = maxW || 400
+  const scale = W / sheetW
+  const H = Math.min(sheetH * scale, 560)
+  const sH = H / sheetH
+  const c = COR[cor] || COR.incolor
+  const sx = v => Math.round(v * scale)
+  // Ponto zero = inf. esq. → no SVG y=0 é em cima, invertemos
+  const sy = v => Math.round((sheetH - v) * sH)
 
-  const handleFinalize=async()=>{
-    if(!layout||!base)return
-    setFinalizing(true)
-    const id=genId()
-    const avgEff=layout.efficiency
-    const areaTotal=pecas.reduce((s,p)=>s+int(p.largura)*int(p.altura)*int(p.quantidade),0)
-    const totalPecas=pecas.reduce((s,p)=>s+(int(p.quantidade)||0),0)
-    const novosRet=[layout.mainScrap].filter(Boolean).map(r=>({id:uid(),cor,largura:Math.round(r.w),altura:Math.round(r.h),area:parseFloat(area_m2(r.w,r.h)),origem:id,status:"ativo"}))
-    const novaOtm={id,cor,chapas_usadas:base.type==="retalho"?0:1,aproveitamento:Math.round(avgEff*10)/10,desperdicio:Math.round((100-avgEff)*10)/10,pecas_totais:totalPecas,area_total:parseFloat((areaTotal/1e6).toFixed(2)),chapa_largura:base.width,chapa_altura:base.height}
-    const pSalvar=pecas.filter(p=>int(p.largura)&&int(p.altura)&&int(p.quantidade)).map(p=>({id:uid(),otimizacao_id:id,largura:int(p.largura),altura:int(p.altura),quantidade:int(p.quantidade)}))
-    try{
-      if(base.type==="retalho"&&base.id)await DB.retalhos.update(base.id,{status:"usado"})
-      await DB.retalhos.insertMany(novosRet)
-      await DB.otimizacoes.insert(novaOtm)
-      await DB.pecas.insertMany(pSalvar)
-      const novosRetList=[...data.retalhos.map(r=>(base.type==="retalho"&&r.id===base.id)?{...r,status:"usado"}:r),...novosRet.map(r=>({...r,criado_em:Date.now()}))]
-      setData(d=>({...d,retalhos:novosRetList,otimizacoes:[{...novaOtm,chapasUsadas:novaOtm.chapas_usadas,pecasTotais:novaOtm.pecas_totais,areaTotal:novaOtm.area_total,criadoEm:Date.now()},...d.otimizacoes]}))
-      navigate("history")
-    }catch(e){alert("Erro: "+e.message)}
-    setFinalizing(false)
-  }
-
-  const svgMaxW=isMobile?Math.min(480,(typeof window!=="undefined"?window.innerWidth:360)-32):Math.min(640,700)
-  const totalPecasCount=pecas.reduce((s,p)=>s+(int(p.quantidade)||0),0)
-
-  // ── SELEÇÃO DE BASE ──
-  if(step==="select-base"){
-    return(
-      <div>
-        <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:24}}>
-          <ArrowLeft size={20} style={{cursor:"pointer",color:T.textMid}} onClick={()=>navigate("dashboard")}/>
-          <div><div style={{fontSize:20,fontWeight:800}}>Otimização Manual Assistida</div><div style={{fontSize:13,color:T.textMuted}}>Selecione a base de corte</div></div>
-        </div>
-        <div style={{display:"flex",flexDirection:"column",gap:14}}>
-          {/* Chapas do estoque */}
-          <div style={{background:T.card,borderRadius:16,padding:18,boxShadow:"0 1px 4px rgba(0,0,0,0.07)"}}>
-            <div style={{fontSize:14,fontWeight:700,marginBottom:12}}>Chapas em estoque</div>
-            {data.chapas.filter(c=>c.quantidade>0).map(c=>(
-              <button key={c.id} onClick={()=>handleSelectBase("chapa",c)}
-                style={{display:"flex",alignItems:"center",justifyContent:"space-between",width:"100%",background:T.bg,border:"1.5px solid "+T.border,borderRadius:10,padding:"12px 14px",marginBottom:8,cursor:"pointer"}}>
-                <div style={{textAlign:"left"}}>
-                  <div style={{fontSize:15,fontWeight:700,fontFamily:"monospace"}}>{c.largura}×{c.altura} mm</div>
-                  <Pill cor={c.cor}/>
-                </div>
-                <span style={{fontSize:13,fontWeight:700,color:T.green}}>{c.quantidade} unid. →</span>
-              </button>
-            ))}
-            {!data.chapas.filter(c=>c.quantidade>0).length&&<div style={{color:T.textMuted,fontSize:13}}>Nenhuma chapa em estoque</div>}
-          </div>
-          {/* Retalhos */}
-          <div style={{background:T.card,borderRadius:16,padding:18,boxShadow:"0 1px 4px rgba(0,0,0,0.07)"}}>
-            <div style={{fontSize:14,fontWeight:700,marginBottom:12}}>Retalhos disponíveis</div>
-            {data.retalhos.filter(r=>r.status==="ativo").slice(0,10).map(r=>(
-              <button key={r.id} onClick={()=>handleSelectBase("retalho",r)}
-                style={{display:"flex",alignItems:"center",justifyContent:"space-between",width:"100%",background:T.bg,border:"1.5px solid "+T.border,borderRadius:10,padding:"12px 14px",marginBottom:8,cursor:"pointer"}}>
-                <div style={{textAlign:"left"}}>
-                  <div style={{fontSize:15,fontWeight:700,fontFamily:"monospace"}}>{r.largura}×{r.altura} mm</div>
-                  <Pill cor={r.cor}/>
-                </div>
-                <span style={{fontSize:13,fontWeight:700,color:T.amber}}>{r.area} m² →</span>
-              </button>
-            ))}
-            {!data.retalhos.filter(r=>r.status==="ativo").length&&<div style={{color:T.textMuted,fontSize:13}}>Nenhum retalho disponível</div>}
-          </div>
-          {/* Dimensões manuais */}
-          <div style={{background:T.card,borderRadius:16,padding:18,boxShadow:"0 1px 4px rgba(0,0,0,0.07)"}}>
-            <div style={{fontSize:14,fontWeight:700,marginBottom:12}}>Inserir dimensões manualmente</div>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
-              {[["manualW","Largura (mm)"],["manualH","Altura (mm)"]].map(([k,label])=>(
-                <div key={k}>
-                  <div style={{fontSize:11,fontWeight:600,color:T.textMid,marginBottom:6}}>{label}</div>
-                  <input type="number" value={k==="manualW"?manualW:manualH} onChange={e=>k==="manualW"?setManualW(e.target.value):setManualH(e.target.value)}
-                    placeholder="Ex: 2200"
-                    style={{width:"100%",padding:"10px 12px",borderRadius:8,border:"1.5px solid "+T.border,fontSize:14,outline:"none",boxSizing:"border-box",background:"#F9FAFB"}}/>
-                </div>
-              ))}
-            </div>
-            <div style={{marginBottom:12}}>
-              <div style={{fontSize:11,fontWeight:600,color:T.textMid,marginBottom:8}}>Cor do vidro</div>
-              <div style={{display:"flex",gap:8}}>
-                {["incolor","verde","fume"].map(c=>(
-                  <button key={c} onClick={()=>setCor(c)}
-                    style={{flex:1,padding:"8px 4px",borderRadius:8,border:"2px solid "+(cor===c?T.green:T.border),background:cor===c?T.greenLight:"#fff",fontSize:12,fontWeight:600,cursor:"pointer",color:cor===c?T.greenDark:T.textMid}}>
-                    {COR[c].label}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <Btn onClick={()=>handleSelectBase("manual")} fullWidth disabled={!int(manualW)||!int(manualH)} size="md">
-              Usar estas dimensões
-            </Btn>
-          </div>
-        </div>
-      </div>
+  function label(posY, posX, w, h, lines, color) {
+    const pw = sx(w), ph = Math.abs(sy(posX) - sy(posX + h))
+    if (pw < 18 || ph < 14) return null
+    const isV = ph > pw * 1.3
+    const cx = sx(posY) + pw / 2, cy = sy(posX) - ph / 2
+    const fs = Math.max(7, Math.min(12, Math.min(pw, ph) * 0.13))
+    const lh = fs + 3
+    const tr = isV ? `rotate(-90,${cx},${cy})` : undefined
+    return (
+      <g>
+        {lines.map((line, i) => (
+          <text key={i} x={cx} y={cy - ((lines.length - 1) / 2 - i) * lh}
+            textAnchor="middle" dominantBaseline="middle"
+            fontSize={fs} fill={color} fontFamily="monospace" fontWeight="700"
+            transform={tr} style={{ userSelect: "none" }}>{line}</text>
+        ))}
+      </g>
     )
   }
 
-  // ── EDIÇÃO ──
-  if(step==="editing"){
-    return(
-      <div>
-        {zoomSheet&&<ZoomModal sheet={zoomSheet} cor={cor} onClose={()=>setZoomSheet(null)}/>}
-        {/* Ação da peça selecionada */}
-        {selectedIdx!==null&&(
-          <div style={{position:"fixed",top:80,right:16,zIndex:300,background:T.card,borderRadius:12,padding:12,boxShadow:"0 4px 24px rgba(0,0,0,0.2)",display:"flex",flexDirection:"column",gap:8,minWidth:140}}>
-            <div style={{fontSize:12,fontWeight:700,color:T.textMuted,marginBottom:4}}>Peça {selectedIdx+1}</div>
-            <button onClick={()=>startEdit(selectedIdx)} style={{background:T.greenLight,border:"none",borderRadius:8,padding:"8px 12px",cursor:"pointer",display:"flex",alignItems:"center",gap:6,fontSize:13,color:T.greenDark,fontWeight:700}}>
-              <Edit2 size={14}/>Editar
-            </button>
-            <button onClick={()=>{
-              if(layout&&layout.pieces[selectedIdx]){
-                const pid=layout.pieces[selectedIdx].ref?.pid
-                const peca=pecas.find(p=>p.id===pid)
-                if(peca)deletePeca(peca.id)
-              }
-            }} style={{background:T.redLight,border:"none",borderRadius:8,padding:"8px 12px",cursor:"pointer",display:"flex",alignItems:"center",gap:6,fontSize:13,color:T.red,fontWeight:700}}>
-              <Trash2 size={14}/>Deletar
-            </button>
-            <button onClick={()=>setSelectedIdx(null)} style={{background:T.bg,border:"1px solid "+T.border,borderRadius:8,padding:"6px 12px",cursor:"pointer",fontSize:12,color:T.textMid}}>
-              Fechar
-            </button>
-          </div>
-        )}
+  if (!layout) return (
+    <div style={{ background: "#1A2A1A", borderRadius: 10, padding: 32, textAlign: "center", color: "#4B5563", fontSize: 13 }}>
+      Adicione peças para ver o mapa de corte em tempo real
+    </div>
+  )
 
-        {/* Header */}
-        <div style={{background:T.dark,borderRadius:14,padding:"14px 18px",marginBottom:14}}>
-          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
-            <div style={{display:"flex",alignItems:"center",gap:10}}>
-              <ArrowLeft size={18} color="#9CA3AF" style={{cursor:"pointer"}} onClick={()=>setStep("select-base")}/>
-              <div>
-                <div style={{color:"#fff",fontSize:15,fontWeight:800}}>Otimização Manual</div>
-                <span style={{background:T.green,color:"#fff",fontSize:10,fontWeight:700,padding:"2px 8px",borderRadius:10}}>Em edição</span>
-              </div>
-            </div>
-            <Btn onClick={handleFinalize} size="sm" disabled={!layout||finalizing} icon={<CheckCircle size={14}/>}>
-              {finalizing?"Salvando...":"Concluir"}
-            </Btn>
-          </div>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,textAlign:"center"}}>
-            <div><div style={{fontSize:10,color:"#9CA3AF"}}>Base</div><div style={{fontSize:13,fontWeight:700,color:"#fff"}}>{base?.width}×{base?.height}</div></div>
-            <div><div style={{fontSize:10,color:"#9CA3AF"}}>Área utilizada</div><div style={{fontSize:13,fontWeight:700,color:T.green}}>{layout?(layout.usedArea/1e6).toFixed(2):"0.00"} m²</div><div style={{fontSize:10,color:"#9CA3AF"}}>{layout?layout.efficiency+"%" :"0%"}</div></div>
-            <div><div style={{fontSize:10,color:"#9CA3AF"}}>Peças</div><div style={{fontSize:13,fontWeight:700,color:"#fff"}}>{totalPecasCount}</div></div>
+  return (
+    <div style={{ position: "relative", borderRadius: 10, overflow: "hidden" }}>
+      <div style={{ background: "#0D1A0D", padding: "8px 14px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <span style={{ fontSize: 11, color: "#9CA3AF", fontFamily: "monospace" }}>
+          MAPA DE CORTE · {sheetW}×{sheetH} mm · <span style={{ color: T.green, fontWeight: 700 }}>{layout.eff}%</span>
+        </span>
+        {onZoom && (
+          <button onClick={onZoom} style={{ background: "#1A2A1A", border: "1px solid #2A3A2A", borderRadius: 6, padding: "4px 10px", cursor: "pointer", display: "flex", alignItems: "center", gap: 5, color: "#9CA3AF", fontSize: 11 }}>
+            <ZoomIn size={13} />Ampliar
+          </button>
+        )}
+      </div>
+
+      <svg width={W} height={H} style={{ display: "block", background: "#C8C8C8" }}>
+        {/* Fundo chapa cinza */}
+        <rect width={W} height={H} fill="#D4D4D4" />
+        {Array.from({ length: 22 }, (_, i) => <line key={"gv"+i} x1={Math.round(W*i/22)} y1={0} x2={Math.round(W*i/22)} y2={H} stroke="#C0C0C0" strokeWidth={0.5}/>)}
+        {Array.from({ length: 18 }, (_, i) => <line key={"gh"+i} x1={0} y1={Math.round(H*i/18)} x2={W} y2={Math.round(H*i/18)} stroke="#C0C0C0" strokeWidth={0.5}/>)}
+        <rect x={1} y={1} width={W-2} height={H-2} fill="none" stroke="#888" strokeWidth={2}/>
+
+        {/* Sucata 🟥 */}
+        {layout.waste.map((r, i) => {
+          const rx=sx(r.posY), ry=sy(r.posX+r.h), rw=sx(r.w), rh=Math.abs(sy(r.posX)-sy(r.posX+r.h))
+          if(rw<3||rh<3)return null
+          return(
+            <g key={"w"+i}>
+              <rect x={rx} y={ry} width={rw} height={rh} fill="#EF444430" stroke="#EF4444" strokeWidth={1.5} strokeDasharray="4 3"/>
+              {label(r.posY,r.posX,r.w,r.h,["SUCATA",Math.round(r.w)+"×"+Math.round(r.h)],"#EF4444")}
+            </g>
+          )
+        })}
+
+        {/* Retalho aproveitável 🟩 */}
+        {layout.reusable.map((r, i) => {
+          const rx=sx(r.posY), ry=sy(r.posX+r.h), rw=sx(r.w), rh=Math.abs(sy(r.posX)-sy(r.posX+r.h))
+          if(rw<3||rh<3)return null
+          return(
+            <g key={"ret"+i}>
+              <rect x={rx} y={ry} width={rw} height={rh} fill="#22C55E22" stroke="#22C55E" strokeWidth={1.5} strokeDasharray="7 3"/>
+              {label(r.posY,r.posX,r.w,r.h,["Retalho",Math.round(r.w)+"×"+Math.round(r.h),area_m2(r.w,r.h)+" m²"],"#15803D")}
+            </g>
+          )
+        })}
+
+        {/* Linhas de corte borda a borda 🔵 */}
+        {layout.pieces.map((p, i) => (
+          <g key={"cut"+i}>
+            <line x1={0} y1={sy(p.posX+p.h)} x2={W} y2={sy(p.posX+p.h)} stroke="#2563EB" strokeWidth={1} strokeDasharray="8 4" opacity={0.55}/>
+            <line x1={sx(p.posY+p.w)} y1={0} x2={sx(p.posY+p.w)} y2={H} stroke="#2563EB" strokeWidth={1} strokeDasharray="8 4" opacity={0.55}/>
+          </g>
+        ))}
+
+        {/* Peças 🟦/🟩/⬛ */}
+        {layout.pieces.map((p, i) => {
+          const px=sx(p.posY), py=sy(p.posX+p.h), pw=sx(p.w), ph=Math.abs(sy(p.posX)-sy(p.posX+p.h))
+          return(
+            <g key={"p"+i}>
+              <rect x={px+1} y={py+1} width={pw-2} height={ph-2} fill={c.piece} stroke={c.stroke} strokeWidth={2} rx={2}/>
+              {pw>18&&ph>13&&<text x={px+6} y={py+12} fontSize={9} fill={c.text+"99"} fontFamily="monospace" fontWeight="700">{i+1}</text>}
+              {label(p.posY,p.posX,p.w,p.h,[p.w+"×"+p.h,"(Y"+p.origY+"×X"+p.origX+")"],c.text)}
+            </g>
+          )
+        })}
+
+        {/* Ponto zero ⚫ */}
+        <circle cx={10} cy={H-10} r={5} fill="#111" stroke="#fff" strokeWidth={1.5}/>
+        <text x={17} y={H-5} fontSize={8} fill="#222" fontFamily="monospace" fontWeight="600">0,0</text>
+
+        {/* Eixos */}
+        <line x1={14} y1={H-12} x2={W-12} y2={H-12} stroke="#555" strokeWidth={1}/>
+        <text x={W/2} y={H-3} textAnchor="middle" fontSize={10} fill="#333" fontFamily="monospace" fontWeight="600">Y = {sheetW} mm</text>
+        <line x1={10} y1={12} x2={10} y2={H-14} stroke="#555" strokeWidth={1}/>
+        <text x={16} y={H/2} fontSize={10} fill="#333" fontFamily="monospace" fontWeight="600" transform={`rotate(-90,16,${H/2})`} textAnchor="middle">X = {sheetH} mm</text>
+      </svg>
+
+      {/* Legenda */}
+      <div style={{ background: "#0D1A0D", padding: "8px 14px", display: "flex", gap: 14, flexWrap: "wrap", alignItems: "center" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: "#9CA3AF" }}>
+          <div style={{ width: 14, height: 10, background: c.piece, border: "2px solid "+c.stroke, borderRadius: 2 }}/>Peça cortada
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: "#9CA3AF" }}>
+          <div style={{ width: 14, height: 10, background: "#22C55E22", border: "1.5px dashed #22C55E", borderRadius: 2 }}/>
+          <span style={{ color: "#22C55E" }}>Retalho (≥300×300)</span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: "#9CA3AF" }}>
+          <div style={{ width: 14, height: 10, background: "#EF444430", border: "1.5px dashed #EF4444", borderRadius: 2 }}/>
+          <span style={{ color: "#EF4444" }}>Sucata</span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: "#9CA3AF" }}>
+          <div style={{ width: 20, height: 2, background: "#2563EB", borderRadius: 1 }}/>
+          <span style={{ color: "#93C5FD" }}>Linha de corte</span>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Otimização Manual Assistida ──
+function ManualOptimization({ data, setData, navigate, retalhoBase }) {
+  const [step, setStep] = useState(retalhoBase ? "editing" : "select-base")
+  const [base, setBase] = useState(retalhoBase
+    ? { type: "retalho", width: int(retalhoBase.largura), height: int(retalhoBase.altura), id: retalhoBase.id, cor: retalhoBase.cor }
+    : null)
+  const [cor, setCor] = useState(retalhoBase?.cor || "incolor")
+  const [entries, setEntries] = useState([])
+  const [layout, setLayout] = useState(null)
+  const [form, setForm] = useState({ y: "", x: "", qtyY: "1", qtyX: "1" })
+  const [editId, setEditId] = useState(null)
+  const [zoomOpen, setZoomOpen] = useState(false)
+  const [manualW, setManualW] = useState("")
+  const [manualH, setManualH] = useState("")
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState("")
+  const isMobile = useIsMobile()
+
+  // Recalcula layout em tempo real
+  useEffect(() => {
+    if (!base || !entries.length) { setLayout(null); return }
+    const mapped = entries.map(e => ({
+      ...e,
+      y: int(e.origY) + 4,
+      x: int(e.origX) + 4,
+    }))
+    setLayout(buildCutLayout(mapped, base.width, base.height))
+  }, [entries, base])
+
+  const addEntry = () => {
+    const Y = int(form.y), X = int(form.x)
+    if (!Y || !X) { setError("Preencha Y (largura) e X (altura)."); return }
+    setError("")
+    const entry = { id: Date.now() + Math.random(), origY: Y, origX: X, qtyY: int(form.qtyY) || 1, qtyX: int(form.qtyX) || 1 }
+    if (editId) {
+      setEntries(prev => prev.map(e => e.id === editId ? { ...entry, id: e.id } : e))
+      setEditId(null)
+    } else {
+      setEntries(prev => [...prev, entry])
+    }
+    setForm({ y: "", x: "", qtyY: "1", qtyX: "1" })
+  }
+
+  const removeEntry = id => setEntries(prev => prev.filter(e => e.id !== id))
+
+  const startEdit = e => {
+    setEditId(e.id)
+    setForm({ y: String(e.origY), x: String(e.origX), qtyY: String(e.qtyY || 1), qtyX: String(e.qtyX || 1) })
+  }
+
+  const handleFinalize = async () => {
+    if (!layout || !base) return
+    setSaving(true)
+    const id = genId()
+    const totalPecas = entries.reduce((s, e) => s + (int(e.qtyY) || 1) * (int(e.qtyX) || 1), 0)
+    const areaUsada = layout.usedArea
+    const novosRet = layout.reusable.map(r => ({
+      id: uid(), cor, largura: Math.round(r.w), altura: Math.round(r.h),
+      area: parseFloat(area_m2(r.w, r.h)), origem: id, status: "ativo"
+    }))
+    const novaOtm = {
+      id, cor, chapas_usadas: base.type === "retalho" ? 0 : 1,
+      aproveitamento: layout.eff, desperdicio: Math.round((100 - layout.eff) * 10) / 10,
+      pecas_totais: totalPecas, area_total: parseFloat((areaUsada / 1e6).toFixed(2)),
+      chapa_largura: base.width, chapa_altura: base.height,
+    }
+    const pSalvar = entries.map(e => ({
+      id: uid(), otimizacao_id: id, largura: int(e.origY), altura: int(e.origX),
+      quantidade: (int(e.qtyY) || 1) * (int(e.qtyX) || 1)
+    }))
+    try {
+      if (base.type === "retalho" && base.id) await DB.retalhos.update(base.id, { status: "usado" })
+      await DB.retalhos.insertMany(novosRet)
+      await DB.otimizacoes.insert(novaOtm)
+      await DB.pecas.insertMany(pSalvar)
+      const novosRetList = [
+        ...data.retalhos.map(r => (base.type === "retalho" && r.id === base.id) ? { ...r, status: "usado" } : r),
+        ...novosRet.map(r => ({ ...r, criado_em: Date.now() }))
+      ]
+      setData(d => ({
+        ...d, retalhos: novosRetList,
+        otimizacoes: [{ ...novaOtm, chapasUsadas: novaOtm.chapas_usadas, pecasTotais: novaOtm.pecas_totais, areaTotal: novaOtm.area_total, criadoEm: Date.now() }, ...d.otimizacoes]
+      }))
+      navigate("history")
+    } catch (e) { alert("Erro ao salvar: " + e.message) }
+    setSaving(false)
+  }
+
+  const svgW = isMobile ? Math.min(500, (typeof window !== "undefined" ? window.innerWidth : 360) - 32) : 580
+  const totalPecas = entries.reduce((s, e) => s + (int(e.qtyY) || 1) * (int(e.qtyX) || 1), 0)
+
+  // ── SELEÇÃO DE BASE ──
+  if (step === "select-base") {
+    return (
+      <div>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 24 }}>
+          <ArrowLeft size={20} style={{ cursor: "pointer", color: T.textMid }} onClick={() => navigate("dashboard")} />
+          <div>
+            <div style={{ fontSize: 20, fontWeight: 800 }}>Otimização Manual Assistida</div>
+            <div style={{ fontSize: 13, color: T.textMuted }}>Selecione a base de corte</div>
           </div>
         </div>
-
-        {/* Mapa de corte */}
-        {layout?(
-          <div style={{marginBottom:14,borderRadius:10,overflow:"hidden",boxShadow:"0 2px 12px rgba(0,0,0,0.2)"}}>
-            <SheetSVG sheet={layout} cor={cor} maxW={svgMaxW} onZoom={()=>setZoomSheet(layout)}
-              onPieceClick={idx=>setSelectedIdx(idx===selectedIdx?null:idx)} selectedPieceIdx={selectedIdx}/>
-          </div>
-        ):(
-          <div style={{background:T.dark,borderRadius:10,padding:32,marginBottom:14,textAlign:"center",color:"#9CA3AF",fontSize:13}}>
-            Adicione peças abaixo para visualizar o mapa de corte em tempo real
-          </div>
-        )}
-
-        {/* Formulário adicionar peça */}
-        <div style={{background:T.card,borderRadius:16,padding:18,marginBottom:14,boxShadow:"0 1px 4px rgba(0,0,0,0.07)"}}>
-          <div style={{fontSize:14,fontWeight:700,marginBottom:14}}>
-            {editingPeca?"Editar peça":"Adicionar peça"}
-            {editingPeca&&<button onClick={()=>{setEditingPeca(null);setForm({largura:"",altura:"",quantidade:"",rotation:0})}} style={{background:"none",border:"none",cursor:"pointer",color:T.red,fontSize:12,marginLeft:8}}>Cancelar</button>}
-          </div>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:12}}>
-            {[["largura","Dimensão X (largura)"],["altura","Dimensão Y (altura)"],["quantidade","Quantidade"]].map(([k,label])=>(
+        <div style={{ background: T.card, borderRadius: 16, padding: 18, marginBottom: 14, boxShadow: "0 1px 4px rgba(0,0,0,0.07)" }}>
+          <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 12 }}>Chapas em estoque</div>
+          {data.chapas.filter(c => c.quantidade > 0).map(c => (
+            <button key={c.id} onClick={() => { setBase({ type: "chapa", width: int(c.largura), height: int(c.altura) }); setCor(c.cor); setStep("editing") }}
+              style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: T.bg, border: "1.5px solid " + T.border, borderRadius: 10, padding: "12px 14px", marginBottom: 8, cursor: "pointer" }}>
+              <div style={{ textAlign: "left" }}>
+                <div style={{ fontSize: 15, fontWeight: 700, fontFamily: "monospace" }}>{c.largura}×{c.altura} mm</div>
+                <Pill cor={c.cor} />
+              </div>
+              <span style={{ fontSize: 13, fontWeight: 700, color: T.green }}>{c.quantidade} unid. →</span>
+            </button>
+          ))}
+          {!data.chapas.filter(c => c.quantidade > 0).length && <div style={{ color: T.textMuted, fontSize: 13 }}>Nenhuma chapa disponível</div>}
+        </div>
+        <div style={{ background: T.card, borderRadius: 16, padding: 18, marginBottom: 14, boxShadow: "0 1px 4px rgba(0,0,0,0.07)" }}>
+          <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 12 }}>Retalhos disponíveis</div>
+          {data.retalhos.filter(r => r.status === "ativo").map(r => (
+            <button key={r.id} onClick={() => { setBase({ type: "retalho", width: int(r.largura), height: int(r.altura), id: r.id }); setCor(r.cor); setStep("editing") }}
+              style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: T.bg, border: "1.5px solid " + T.border, borderRadius: 10, padding: "12px 14px", marginBottom: 8, cursor: "pointer" }}>
+              <div style={{ textAlign: "left" }}>
+                <div style={{ fontSize: 15, fontWeight: 700, fontFamily: "monospace" }}>{r.largura}×{r.altura} mm</div>
+                <Pill cor={r.cor} />
+              </div>
+              <span style={{ fontSize: 13, fontWeight: 700, color: T.amber }}>{r.area} m² →</span>
+            </button>
+          ))}
+          {!data.retalhos.filter(r => r.status === "ativo").length && <div style={{ color: T.textMuted, fontSize: 13 }}>Nenhum retalho disponível</div>}
+        </div>
+        <div style={{ background: T.card, borderRadius: 16, padding: 18, boxShadow: "0 1px 4px rgba(0,0,0,0.07)" }}>
+          <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 12 }}>Inserir dimensões manualmente</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>
+            {[["manualW", "Y — Largura (mm)"], ["manualH", "X — Altura (mm)"]].map(([k, label]) => (
               <div key={k}>
-                <div style={{fontSize:11,fontWeight:600,color:T.textMid,marginBottom:5}}>{label}</div>
-                <input type="number" value={form[k]} onChange={e=>setForm(f=>({...f,[k]:e.target.value}))}
-                  style={{width:"100%",padding:"10px 10px",borderRadius:8,border:"1.5px solid "+T.border,fontSize:14,outline:"none",boxSizing:"border-box",background:"#F9FAFB"}}/>
+                <div style={{ fontSize: 11, fontWeight: 600, color: T.textMid, marginBottom: 6 }}>{label}</div>
+                <input type="number" value={k === "manualW" ? manualW : manualH}
+                  onChange={e => k === "manualW" ? setManualW(e.target.value) : setManualH(e.target.value)}
+                  placeholder="Ex: 2200"
+                  style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1.5px solid " + T.border, fontSize: 14, outline: "none", boxSizing: "border-box", background: "#F9FAFB" }} />
               </div>
             ))}
           </div>
-          <div style={{marginBottom:12}}>
-            <div style={{fontSize:11,fontWeight:600,color:T.textMid,marginBottom:6}}>Rotação</div>
-            <div style={{display:"flex",gap:8}}>
-              {[0,90].map(r=>(
-                <button key={r} onClick={()=>setForm(f=>({...f,rotation:r}))}
-                  style={{flex:1,padding:"8px",borderRadius:8,border:"2px solid "+(form.rotation===r?T.green:T.border),background:form.rotation===r?T.greenLight:"#fff",fontSize:13,fontWeight:700,cursor:"pointer",color:form.rotation===r?T.greenDark:T.textMid}}>
-                  {r}° {r===0?"Normal":"Girar"}
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: T.textMid, marginBottom: 8 }}>Cor do vidro</div>
+            <div style={{ display: "flex", gap: 8 }}>
+              {["incolor", "verde", "fume"].map(c => (
+                <button key={c} onClick={() => setCor(c)}
+                  style={{ flex: 1, padding: "8px 4px", borderRadius: 8, border: "2px solid " + (cor === c ? T.green : T.border), background: cor === c ? T.greenLight : "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer", color: cor === c ? T.greenDark : T.textMid }}>
+                  {COR[c]?.label || c}
                 </button>
               ))}
             </div>
           </div>
-          {form.largura&&form.altura&&(
-            <div style={{background:T.greenLight,borderRadius:8,padding:"8px 12px",marginBottom:12,fontSize:12,color:T.greenDark}}>
-              ✓ Acréscimo automático: {int(form.largura)+4}×{int(form.altura)+4} mm (+4mm total)
-            </div>
-          )}
-          <Btn onClick={addPeca} fullWidth size="md" icon={<Plus size={16}/>} disabled={!int(form.largura)||!int(form.altura)||!int(form.quantidade)}>
-            {editingPeca?"Salvar alterações":"+ Adicionar peça"}
+          <Btn onClick={() => { const W = int(manualW), H = int(manualH); if (!W || !H) return; setBase({ type: "manual", width: W, height: H }); setStep("editing") }}
+            fullWidth disabled={!int(manualW) || !int(manualH)} size="md">
+            Usar estas dimensões
           </Btn>
         </div>
-
-        {/* Lista de peças */}
-        {pecas.filter(p=>int(p.largura)&&int(p.altura)&&int(p.quantidade)).length>0&&(
-          <div style={{background:T.card,borderRadius:16,padding:18,boxShadow:"0 1px 4px rgba(0,0,0,0.07)"}}>
-            <div style={{fontSize:14,fontWeight:700,marginBottom:12}}>Peças adicionadas</div>
-            {pecas.filter(p=>int(p.largura)&&int(p.altura)&&int(p.quantidade)).map((p,i)=>(
-              <div key={p.id} style={{display:"flex",alignItems:"center",justifyContent:"space-between",paddingBottom:10,borderBottom:"1px solid "+T.border,marginBottom:10}}>
-                <div>
-                  <span style={{fontSize:14,fontWeight:700,fontFamily:"monospace"}}>{p.largura}×{p.altura} mm</span>
-                  <span style={{fontSize:13,color:T.green,fontWeight:600,marginLeft:8}}>{p.quantidade}× </span>
-                  {p.rotation===90&&<span style={{fontSize:11,color:T.amber}}>(90°)</span>}
-                </div>
-                <div style={{display:"flex",gap:6}}>
-                  <button onClick={()=>{setForm({largura:p.largura,altura:p.altura,quantidade:p.quantidade,rotation:p.rotation||0});setEditingPeca(p.id)}} style={{background:T.greenLight,border:"none",borderRadius:6,padding:"4px 8px",cursor:"pointer",fontSize:11,color:T.greenDark}}>Editar</button>
-                  <button onClick={()=>deletePeca(p.id)} style={{background:T.redLight,border:"none",borderRadius:6,padding:"4px 8px",cursor:"pointer",fontSize:11,color:T.red}}>Remover</button>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
       </div>
     )
   }
 
-  return null
+  // ── TELA DE EDIÇÃO ──
+  return (
+    <div>
+      {zoomOpen && layout && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 999, background: "rgba(0,0,0,0.95)", display: "flex", flexDirection: "column" }}>
+          <div style={{ display: "flex", justifyContent: "flex-end", padding: "16px 20px" }}>
+            <button onClick={() => setZoomOpen(false)} style={{ background: "#1A2A1A", border: "1px solid #2A3A2A", borderRadius: 10, padding: "8px 18px", cursor: "pointer", display: "flex", alignItems: "center", gap: 8, color: "#fff", fontSize: 14, fontWeight: 700 }}>
+              <X size={16} />Fechar
+            </button>
+          </div>
+          <div style={{ flex: 1, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "0 20px 20px", overflowY: "auto" }}>
+            <div style={{ width: "100%", maxWidth: 1100 }}>
+              <CutMapSVG layout={layout} sheetW={base.width} sheetH={base.height} cor={cor}
+                maxW={Math.min(1100, (typeof window !== "undefined" ? window.innerWidth : 800) - 40)} />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Header */}
+      <div style={{ background: T.dark, borderRadius: 14, padding: "14px 18px", marginBottom: 14 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <ArrowLeft size={18} color="#9CA3AF" style={{ cursor: "pointer" }} onClick={() => setStep("select-base")} />
+            <div>
+              <div style={{ color: "#fff", fontSize: 15, fontWeight: 800 }}>Otimização Manual Assistida</div>
+              <span style={{ background: T.green, color: "#fff", fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 10 }}>Em edição</span>
+            </div>
+          </div>
+          <Btn onClick={handleFinalize} size="sm" disabled={!layout || saving} icon={<CheckCircle size={14} />}>
+            {saving ? "Salvando..." : "Concluir"}
+          </Btn>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 8, textAlign: "center" }}>
+          {[["Base", `${base?.width}×${base?.height}`], ["Área utilizada", layout ? `${(layout.usedArea / 1e6).toFixed(2)} m²` : "0 m²"], ["Aproveit.", layout ? `${layout.eff}%` : "0%"], ["Peças", totalPecas]].map(([l, v]) => (
+            <div key={l}>
+              <div style={{ fontSize: 9, color: "#9CA3AF" }}>{l}</div>
+              <div style={{ fontSize: 13, fontWeight: 800, color: l === "Aproveit." ? T.green : "#fff" }}>{v}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Mapa de corte */}
+      <div style={{ marginBottom: 14, borderRadius: 10, overflow: "hidden", boxShadow: "0 2px 12px rgba(0,0,0,0.15)" }}>
+        <CutMapSVG layout={layout} sheetW={base.width} sheetH={base.height} cor={cor}
+          maxW={svgW} onZoom={() => setZoomOpen(true)} />
+      </div>
+
+      {/* Formulário */}
+      <div style={{ background: T.card, borderRadius: 16, padding: 18, marginBottom: 14, boxShadow: "0 1px 4px rgba(0,0,0,0.07)" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <div style={{ fontSize: 14, fontWeight: 700 }}>{editId ? "Editar peça" : "Adicionar peça"}</div>
+          {editId && <button onClick={() => { setEditId(null); setForm({ y: "", x: "", qtyY: "1", qtyX: "1" }) }} style={{ background: "none", border: "none", cursor: "pointer", color: T.red, fontSize: 12, fontWeight: 600 }}>Cancelar edição</button>}
+        </div>
+
+        {/* Y e X — Y primeiro */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>
+          {[["y", "Y — Largura (mm)"], ["x", "X — Altura (mm)"]].map(([k, label]) => (
+            <div key={k}>
+              <div style={{ fontSize: 11, fontWeight: 600, color: T.textMid, marginBottom: 6 }}>{label}</div>
+              <input type="number" value={form[k]} onChange={e => setForm(f => ({ ...f, [k]: e.target.value }))}
+                style={{ width: "100%", padding: "11px 12px", borderRadius: 8, border: "1.5px solid " + T.border, fontSize: 15, outline: "none", boxSizing: "border-box", background: "#F9FAFB" }} />
+            </div>
+          ))}
+        </div>
+
+        {/* Quantidades */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 600, color: T.textMid, marginBottom: 4 }}>Qtd Y <span style={{ color: T.amber, fontSize: 10 }}>→ cresce para o lado</span></div>
+            <input type="number" value={form.qtyY} onChange={e => setForm(f => ({ ...f, qtyY: e.target.value }))} min={1} placeholder="1"
+              style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1.5px solid " + T.border, fontSize: 14, outline: "none", boxSizing: "border-box", background: "#F9FAFB" }} />
+          </div>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 600, color: T.textMid, marginBottom: 4 }}>Qtd X <span style={{ color: T.green, fontSize: 10 }}>↑ cresce para cima</span></div>
+            <input type="number" value={form.qtyX} onChange={e => setForm(f => ({ ...f, qtyX: e.target.value }))} min={1} placeholder="1"
+              style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1.5px solid " + T.border, fontSize: 14, outline: "none", boxSizing: "border-box", background: "#F9FAFB" }} />
+          </div>
+        </div>
+
+        {form.y && form.x && (
+          <div style={{ background: T.greenLight, borderRadius: 8, padding: "8px 12px", marginBottom: 12, fontSize: 12, color: T.greenDark }}>
+            ✓ Corte: Y={int(form.y) + 4}×X={int(form.x) + 4} mm (+4mm) · {int(form.qtyY) || 1}×Y por {int(form.qtyX) || 1}×X = <strong>{(int(form.qtyY) || 1) * (int(form.qtyX) || 1)} peças</strong>
+          </div>
+        )}
+
+        {error && <div style={{ background: T.redLight, border: "1px solid " + T.red, borderRadius: 8, padding: "8px 12px", marginBottom: 12, fontSize: 13, color: T.red }}>{error}</div>}
+
+        <Btn onClick={addEntry} fullWidth size="md" icon={<Plus size={16} />} disabled={!int(form.y) || !int(form.x)}>
+          {editId ? "Salvar alterações" : "+ Adicionar peça"}
+        </Btn>
+      </div>
+
+      {/* Lista de peças */}
+      {entries.length > 0 && (
+        <div style={{ background: T.card, borderRadius: 16, padding: 18, boxShadow: "0 1px 4px rgba(0,0,0,0.07)" }}>
+          <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 12 }}>Peças adicionadas</div>
+          {entries.map((e, i) => (
+            <div key={e.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", paddingBottom: 10, borderBottom: "1px solid " + T.border, marginBottom: 10 }}>
+              <div>
+                <span style={{ fontSize: 14, fontWeight: 700, fontFamily: "monospace" }}>Y{e.origY}×X{e.origX} mm</span>
+                <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>
+                  {e.qtyY||1}×Y · {e.qtyX||1}×X = <span style={{ color: T.green, fontWeight: 700 }}>{(e.qtyY||1)*(e.qtyX||1)} peças</span>
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 6 }}>
+                <button onClick={() => startEdit(e)} style={{ background: T.greenLight, border: "none", borderRadius: 6, padding: "5px 10px", cursor: "pointer", fontSize: 12, color: T.greenDark, fontWeight: 600 }}>Editar</button>
+                <button onClick={() => removeEntry(e.id)} style={{ background: T.redLight, border: "none", borderRadius: 6, padding: "5px 10px", cursor: "pointer", fontSize: 12, color: T.red, fontWeight: 600 }}>Remover</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
 }
 
-// ══════════════════════════════════════════════════════
-// HISTÓRICO
-// ══════════════════════════════════════════════════════
 function HistoryDetail({otimizacao,onVoltar,onReutilizar}){
   const[pecas,setPecas]=useState([])
   const[loading,setLoading]=useState(true)
