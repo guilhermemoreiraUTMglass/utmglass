@@ -1175,25 +1175,54 @@ function CutMapSVG({ layout, sheetW, sheetH, cor, maxW, onZoom }) {
           )
         })}
 
-        {/* Linhas de corte reais — apenas cortes que existem de borda a borda */}
+        {/* Linhas de corte reais borda a borda */}
         {(()=>{
-          // Coleta cortes horizontais únicos (topo de cada grupo de peças na mesma altura)
+          // REGRA: linha horizontal = altura máxima das peças em cada "faixa de base"
+          // REGRA: linha vertical = só entre peças que estão LADO A LADO na mesma faixa horizontal (mesma posX)
           const hCuts=new Set()
           const vCuts=new Set()
+
+          // Agrupa peças por posX (mesma linha base = mesma zona)
+          const rows={}
           layout.pieces.forEach(p=>{
-            // Linha horizontal no topo da peça — só se não houver peça logo acima
-            const topY=p.posX+p.h
-            const hasAbove=layout.pieces.some(o=>Math.abs(o.posX-topY)<2&&o.posY<p.posY+p.w&&o.posY+o.w>p.posY)
-            if(!hasAbove&&topY<sheetH-2)hCuts.add(Math.round(topY))
-            // Linha vertical à direita da peça — só se não houver peça logo à direita na mesma faixa vertical
-            const rightX=p.posY+p.w
-            const hasRight=layout.pieces.some(o=>Math.abs(o.posY-rightX)<2&&o.posX<p.posX+p.h&&o.posX+o.h>p.posX)
-            if(!hasRight&&rightX<sheetW-2)vCuts.add(Math.round(rightX))
+            const key=Math.round(p.posX)
+            if(!rows[key])rows[key]=[]
+            rows[key].push(p)
           })
+
+          Object.values(rows).forEach(row=>{
+            // Linha horizontal = topo da peça mais ALTA nesta faixa (borda a borda em Y)
+            const maxTop=Math.max(...row.map(p=>p.posX+p.h))
+            if(maxTop<sheetH-2)hCuts.add(Math.round(maxTop))
+
+            // Linha vertical = apenas ENTRE peças adjacentes na mesma faixa
+            // Ordena por posY
+            const sorted=[...row].sort((a,b)=>a.posY-b.posY)
+            for(let i=0;i<sorted.length-1;i++){
+              const cur=sorted[i], nxt=sorted[i+1]
+              // Se a próxima peça começa exatamente onde a atual termina
+              if(Math.abs((cur.posY+cur.w)-nxt.posY)<4){
+                vCuts.add(Math.round(cur.posY+cur.w))
+              }
+            }
+          })
+
           return(
             <g>
-              {[...hCuts].map(y=><line key={"hc"+y} x1={0} y1={sy(y)} x2={W} y2={sy(y)} stroke="#2563EB" strokeWidth={1.5} strokeDasharray="10 5" opacity={0.7}/>)}
-              {[...vCuts].map(x=><line key={"vc"+x} x1={sx(x)} y1={0} x2={sx(x)} y2={H} stroke="#2563EB" strokeWidth={1.5} strokeDasharray="10 5" opacity={0.7}/>)}
+              {[...hCuts].map(y=>(
+                <line key={"hc"+y} x1={0} y1={sy(y)} x2={W} y2={sy(y)}
+                  stroke="#2563EB" strokeWidth={1.5} strokeDasharray="10 5" opacity={0.75}/>
+              ))}
+              {[...vCuts].map(x=>{
+                // Linha vertical só na altura das peças dessa faixa, não chapa toda
+                const rowPieces=layout.pieces.filter(p=>Math.abs((p.posY+p.w)-x)<4||Math.abs(p.posY-x)<4)
+                const minX=Math.min(...rowPieces.map(p=>p.posX))
+                const maxX=Math.max(...rowPieces.map(p=>p.posX+p.h))
+                return(
+                  <line key={"vc"+x} x1={sx(x)} y1={sy(maxX)} x2={sx(x)} y2={sy(minX)}
+                    stroke="#2563EB" strokeWidth={1.5} strokeDasharray="10 5" opacity={0.75}/>
+                )
+              })}
             </g>
           )
         })()}
