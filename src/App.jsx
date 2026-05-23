@@ -1021,88 +1021,107 @@ function NewOptimization({data,setData,navigate,pecasPreenchidas}){
 // ══════════════════════════════════════════════════════════════
 const SCRAP_MIN = 300
 
-function buildCutLayout(entries, sheetW, sheetH) {
-  const pieces = []
-  const reusable = []
-  const waste = []
+// ══════════════════════════════════════════════════════════════
+// MOTOR GUILLOTINE — pontos clicáveis, sem linhas em chapa vazia
+// ══════════════════════════════════════════════════════════════
+const SCRAP_MIN = 300
 
-  // Zonas disponíveis: {x0=posY, y0=posX, w=largura, h=altura}
-  let zones = [{ x0: 0, y0: 0, w: sheetW, h: sheetH }]
+function buildCutLayout(entries, sheetW, sheetH) {
+  // zones: { id, x0, y0, w, h } — zonas disponíveis para inserção
+  // cada entry tem { id, origY, origX, qtyY, qtyX, zoneId? }
+  const pieces = []
+  const waste = []
+  let zoneCounter = 1
+
+  // Zona inicial = chapa inteira
+  let zones = [{ id: zoneCounter++, x0: 0, y0: 0, w: sheetW, h: sheetH }]
 
   for (const entry of entries) {
-    if (!zones.length) break
-
-    const pieceW = int(entry.y)  // largura com acréscimo
-    const pieceH = int(entry.x)  // altura com acréscimo
+    const pieceW = int(entry.origY) + 4
+    const pieceH = int(entry.origX) + 4
     const qtyY = Math.max(1, int(entry.qtyY) || 1)
     const qtyX = Math.max(1, int(entry.qtyX) || 1)
     const totalW = pieceW * qtyY
     const totalH = pieceH * qtyX
 
-    // Encontra primeira zona que cabe
-    const zIdx = zones.findIndex(z => z.w >= totalW && z.h >= totalH)
+    // Usa zona selecionada pelo operador ou primeira que cabe
+    let zIdx = -1
+    if (entry.zoneId != null) {
+      zIdx = zones.findIndex(z => z.id === entry.zoneId && z.w >= totalW && z.h >= totalH)
+    }
+    if (zIdx === -1) {
+      zIdx = zones.findIndex(z => z.w >= totalW && z.h >= totalH)
+    }
     if (zIdx === -1) continue
 
     const zone = zones.splice(zIdx, 1)[0]
 
-    // Adiciona peças na grade qtyY (lado) x qtyX (cima)
+    // Posiciona peças na grade
     for (let ix = 0; ix < qtyX; ix++) {
       for (let iy = 0; iy < qtyY; iy++) {
         pieces.push({
           posY: zone.x0 + iy * pieceW,
           posX: zone.y0 + ix * pieceH,
-          w: pieceW,
-          h: pieceH,
-          origY: entry.origY,
-          origX: entry.origX,
+          w: pieceW, h: pieceH,
+          origY: int(entry.origY), origX: int(entry.origX),
           entryId: entry.id,
         })
       }
     }
 
-    const usedW = totalW
-    const usedH = totalH
-    const remW = zone.w - usedW
-    const remH = zone.h - usedH
+    const usedW = totalW, usedH = totalH
+    const remW = zone.w - usedW, remH = zone.h - usedH
 
-    // Zona à direita (sobra Y)
+    // Zona à direita
     if (remW > 0 && zone.h > 0) {
-      const z = { x0: zone.x0 + usedW, y0: zone.y0, w: remW, h: zone.h }
-      if (remW >= SCRAP_MIN && zone.h >= SCRAP_MIN) reusable.push({ posY: z.x0, posX: z.y0, w: z.w, h: z.h })
-      else waste.push({ posY: z.x0, posX: z.y0, w: z.w, h: z.h })
-      zones.push(z)
+      zones.push({ id: zoneCounter++, x0: zone.x0 + usedW, y0: zone.y0, w: remW, h: zone.h })
     }
-
-    // Zona acima (sobra X) — somente na largura usada
+    // Zona acima
     if (remH > 0 && usedW > 0) {
-      const z = { x0: zone.x0, y0: zone.y0 + usedH, w: usedW, h: remH }
-      if (usedW >= SCRAP_MIN && remH >= SCRAP_MIN) reusable.push({ posY: z.x0, posX: z.y0, w: z.w, h: z.h })
-      else waste.push({ posY: z.x0, posX: z.y0, w: z.w, h: z.h })
-      zones.push(z)
+      zones.push({ id: zoneCounter++, x0: zone.x0, y0: zone.y0 + usedH, w: usedW, h: remH })
     }
+    // Retalhos/sucata gerados apenas nas bordas das peças (não na chapa livre)
+    // são calculados ao final pelas zonas residuais pequenas após todas as entradas
   }
 
-  // Zonas restantes
+  // Retalhos/sucata = zonas que ficaram após todas as entradas
+  // MAS apenas as adjacentes a peças existentes (não a chapa livre toda)
+  const occupiedBounds = pieces.length > 0 ? {
+    maxX: Math.max(...pieces.map(p => p.posX + p.h)),
+    maxY: Math.max(...pieces.map(p => p.posY + p.w)),
+  } : { maxX: 0, maxY: 0 }
+
+  const reusable = []
   for (const z of zones) {
     if (!z.w || !z.h) continue
-    if (z.w >= SCRAP_MIN && z.h >= SCRAP_MIN) reusable.push({ posY: z.x0, posX: z.y0, w: z.w, h: z.h })
-    else waste.push({ posY: z.x0, posX: z.y0, w: z.w, h: z.h })
+    // Só marcar como retalho/sucata se adjacente a área já cortada
+    const isAdjacent = (z.x0 < occupiedBounds.maxY && z.y0 < occupiedBounds.maxX)
+    if (!isAdjacent) continue // chapa livre — não marca nada
+    if (z.w >= SCRAP_MIN && z.h >= SCRAP_MIN) {
+      reusable.push({ posY: z.x0, posX: z.y0, w: z.w, h: z.h })
+    } else if (z.w > 0 && z.h > 0) {
+      waste.push({ posY: z.x0, posX: z.y0, w: z.w, h: z.h })
+    }
   }
 
   const usedArea = pieces.reduce((s, p) => s + p.w * p.h, 0)
   const totalArea = sheetW * sheetH
-  return { pieces, reusable, waste, usedArea, totalArea, eff: Math.round((usedArea / totalArea) * 1000) / 10 }
+  return {
+    pieces, reusable, waste,
+    availableZones: zones,
+    usedArea, totalArea,
+    eff: Math.round((usedArea / totalArea) * 1000) / 10,
+  }
 }
 
-// ── SVG Mapa de corte industrial ──
-function CutMapSVG({ layout, sheetW, sheetH, cor, maxW, onZoom }) {
+// ── SVG Mapa de corte ──
+function CutMapSVG({ layout, sheetW, sheetH, cor, maxW, onZoom, selectedZoneId, onZoneClick }) {
   const W = maxW || 400
   const scale = W / sheetW
   const H = Math.min(sheetH * scale, 560)
   const sH = H / sheetH
   const c = COR[cor] || COR.incolor
   const sx = v => Math.round(v * scale)
-  // Ponto zero = inf. esq. → no SVG y=0 é em cima, invertemos
   const sy = v => Math.round((sheetH - v) * sH)
 
   function label(posY, posX, w, h, lines, color) {
@@ -1125,6 +1144,9 @@ function CutMapSVG({ layout, sheetW, sheetH, cor, maxW, onZoom }) {
     )
   }
 
+  // Zonas disponíveis para mostrar pontos clicáveis
+  const zones = layout ? layout.availableZones || [] : []
+
   if (!layout) return (
     <div style={{ background: "#1A2A1A", borderRadius: 10, padding: 32, textAlign: "center", color: "#4B5563", fontSize: 13 }}>
       Adicione peças para ver o mapa de corte em tempo real
@@ -1144,20 +1166,21 @@ function CutMapSVG({ layout, sheetW, sheetH, cor, maxW, onZoom }) {
         )}
       </div>
 
-      <svg width={W} height={H} style={{ display: "block", background: "#C8C8C8" }}>
-        {/* Fundo chapa cinza */}
+      <svg width={W} height={H} style={{ display: "block", background: "#D4D4D4" }}>
+        {/* Fundo chapa cinza limpo */}
         <rect width={W} height={H} fill="#D4D4D4" />
-        {Array.from({ length: 22 }, (_, i) => <line key={"gv"+i} x1={Math.round(W*i/22)} y1={0} x2={Math.round(W*i/22)} y2={H} stroke="#C0C0C0" strokeWidth={0.5}/>)}
-        {Array.from({ length: 18 }, (_, i) => <line key={"gh"+i} x1={0} y1={Math.round(H*i/18)} x2={W} y2={Math.round(H*i/18)} stroke="#C0C0C0" strokeWidth={0.5}/>)}
+        {/* Grid sutil */}
+        {Array.from({ length: 22 }, (_, i) => <line key={"gv"+i} x1={Math.round(W*i/22)} y1={0} x2={Math.round(W*i/22)} y2={H} stroke="#C8C8C8" strokeWidth={0.4}/>)}
+        {Array.from({ length: 18 }, (_, i) => <line key={"gh"+i} x1={0} y1={Math.round(H*i/18)} x2={W} y2={Math.round(H*i/18)} stroke="#C8C8C8" strokeWidth={0.4}/>)}
         <rect x={1} y={1} width={W-2} height={H-2} fill="none" stroke="#888" strokeWidth={2}/>
 
         {/* Sucata 🟥 */}
         {layout.waste.map((r, i) => {
           const rx=sx(r.posY), ry=sy(r.posX+r.h), rw=sx(r.w), rh=Math.abs(sy(r.posX)-sy(r.posX+r.h))
-          if(rw<3||rh<3)return null
+          if(rw<3||rh<3) return null
           return(
             <g key={"w"+i}>
-              <rect x={rx} y={ry} width={rw} height={rh} fill="#EF444430" stroke="#EF4444" strokeWidth={1.5} strokeDasharray="4 3"/>
+              <rect x={rx} y={ry} width={rw} height={rh} fill="#EF444428" stroke="#EF4444" strokeWidth={1.5} strokeDasharray="4 3"/>
               {label(r.posY,r.posX,r.w,r.h,["SUCATA",Math.round(r.w)+"×"+Math.round(r.h)],"#EF4444")}
             </g>
           )
@@ -1166,71 +1189,58 @@ function CutMapSVG({ layout, sheetW, sheetH, cor, maxW, onZoom }) {
         {/* Retalho aproveitável 🟩 */}
         {layout.reusable.map((r, i) => {
           const rx=sx(r.posY), ry=sy(r.posX+r.h), rw=sx(r.w), rh=Math.abs(sy(r.posX)-sy(r.posX+r.h))
-          if(rw<3||rh<3)return null
+          if(rw<3||rh<3) return null
           return(
             <g key={"ret"+i}>
-              <rect x={rx} y={ry} width={rw} height={rh} fill="#22C55E22" stroke="#22C55E" strokeWidth={1.5} strokeDasharray="7 3"/>
+              <rect x={rx} y={ry} width={rw} height={rh} fill="#22C55E20" stroke="#22C55E" strokeWidth={1.5} strokeDasharray="7 3"/>
               {label(r.posY,r.posX,r.w,r.h,["Retalho",Math.round(r.w)+"×"+Math.round(r.h),area_m2(r.w,r.h)+" m²"],"#15803D")}
             </g>
           )
         })}
 
-        {/* Linhas de corte reais borda a borda */}
+        {/* Linhas de corte — apenas horizontais no topo das peças, borda a borda em Y */}
         {(()=>{
-          // REGRA: linha horizontal = altura máxima das peças em cada "faixa de base"
-          // REGRA: linha vertical = só entre peças que estão LADO A LADO na mesma faixa horizontal (mesma posX)
-          const hCuts=new Set()
-          const vCuts=new Set()
-
-          // Agrupa peças por posX (mesma linha base = mesma zona)
-          const rows={}
-          layout.pieces.forEach(p=>{
-            const key=Math.round(p.posX)
-            if(!rows[key])rows[key]=[]
+          const hCuts = new Set()
+          const vCuts = new Set()
+          // Agrupa peças por faixa de base (posX similar)
+          const rows = {}
+          layout.pieces.forEach(p => {
+            const key = Math.round(p.posX)
+            if (!rows[key]) rows[key] = []
             rows[key].push(p)
           })
-
-          Object.values(rows).forEach(row=>{
-            // Linha horizontal = topo da peça mais ALTA nesta faixa (borda a borda em Y)
-            const maxTop=Math.max(...row.map(p=>p.posX+p.h))
-            if(maxTop<sheetH-2)hCuts.add(Math.round(maxTop))
-
-            // Linha vertical = apenas ENTRE peças adjacentes na mesma faixa
-            // Ordena por posY
-            const sorted=[...row].sort((a,b)=>a.posY-b.posY)
-            for(let i=0;i<sorted.length-1;i++){
-              const cur=sorted[i], nxt=sorted[i+1]
-              // Se a próxima peça começa exatamente onde a atual termina
-              if(Math.abs((cur.posY+cur.w)-nxt.posY)<4){
-                vCuts.add(Math.round(cur.posY+cur.w))
+          Object.values(rows).forEach(row => {
+            const maxTop = Math.max(...row.map(p => p.posX + p.h))
+            if (maxTop < sheetH - 2) hCuts.add(Math.round(maxTop))
+            // Vertical apenas entre peças adjacentes na mesma faixa
+            const sorted = [...row].sort((a, b) => a.posY - b.posY)
+            for (let i = 0; i < sorted.length - 1; i++) {
+              if (Math.abs((sorted[i].posY + sorted[i].w) - sorted[i+1].posY) < 4) {
+                vCuts.add(Math.round(sorted[i].posY + sorted[i].w))
               }
             }
           })
-
-          return(
+          return (
             <g>
-              {[...hCuts].map(y=>(
-                <line key={"hc"+y} x1={0} y1={sy(y)} x2={W} y2={sy(y)}
-                  stroke="#2563EB" strokeWidth={1.5} strokeDasharray="10 5" opacity={0.75}/>
+              {[...hCuts].map(y => (
+                <line key={"hc"+y} x1={0} y1={sy(y)} x2={W} y2={sy(y)} stroke="#2563EB" strokeWidth={1.5} strokeDasharray="10 5" opacity={0.7}/>
               ))}
-              {[...vCuts].map(x=>{
-                // Linha vertical só na altura das peças dessa faixa, não chapa toda
-                const rowPieces=layout.pieces.filter(p=>Math.abs((p.posY+p.w)-x)<4||Math.abs(p.posY-x)<4)
-                const minX=Math.min(...rowPieces.map(p=>p.posX))
-                const maxX=Math.max(...rowPieces.map(p=>p.posX+p.h))
-                return(
-                  <line key={"vc"+x} x1={sx(x)} y1={sy(maxX)} x2={sx(x)} y2={sy(minX)}
-                    stroke="#2563EB" strokeWidth={1.5} strokeDasharray="10 5" opacity={0.75}/>
+              {[...vCuts].map(x => {
+                const row = layout.pieces.filter(p => Math.abs((p.posY+p.w)-x)<4 || Math.abs(p.posY-x)<4)
+                const minBase = Math.min(...row.map(p=>p.posX))
+                const maxTop = Math.max(...row.map(p=>p.posX+p.h))
+                return (
+                  <line key={"vc"+x} x1={sx(x)} y1={sy(maxTop)} x2={sx(x)} y2={sy(minBase)} stroke="#2563EB" strokeWidth={1.5} strokeDasharray="10 5" opacity={0.7}/>
                 )
               })}
             </g>
           )
         })()}
 
-        {/* Peças 🟦/🟩/⬛ */}
+        {/* Peças */}
         {layout.pieces.map((p, i) => {
           const px=sx(p.posY), py=sy(p.posX+p.h), pw=sx(p.w), ph=Math.abs(sy(p.posX)-sy(p.posX+p.h))
-          return(
+          return (
             <g key={"p"+i}>
               <rect x={px+1} y={py+1} width={pw-2} height={ph-2} fill={c.piece} stroke={c.stroke} strokeWidth={2} rx={2}/>
               {pw>18&&ph>13&&<text x={px+6} y={py+12} fontSize={9} fill={c.text+"99"} fontFamily="monospace" fontWeight="700">{i+1}</text>}
@@ -1239,7 +1249,23 @@ function CutMapSVG({ layout, sheetW, sheetH, cor, maxW, onZoom }) {
           )
         })}
 
-        {/* Ponto zero ⚫ */}
+        {/* Pontos clicáveis — canto inferior esquerdo de cada zona disponível */}
+        {onZoneClick && zones.map(z => {
+          const dotX = sx(z.x0) + 6
+          const dotY = sy(z.y0) - 6
+          const isSelected = selectedZoneId === z.id
+          return (
+            <g key={"dot"+z.id} style={{ cursor: "pointer" }} onClick={() => onZoneClick(z.id)}>
+              <circle cx={dotX} cy={dotY} r={isSelected ? 10 : 7}
+                fill={isSelected ? T.green : "#111"}
+                stroke={isSelected ? "#fff" : T.green}
+                strokeWidth={2} opacity={0.9}/>
+              {isSelected && <circle cx={dotX} cy={dotY} r={14} fill="none" stroke={T.green} strokeWidth={1.5} opacity={0.4}/>}
+            </g>
+          )
+        })}
+
+        {/* Ponto zero */}
         <circle cx={10} cy={H-10} r={5} fill="#111" stroke="#fff" strokeWidth={1.5}/>
         <text x={17} y={H-5} fontSize={8} fill="#222" fontFamily="monospace" fontWeight="600">0,0</text>
 
@@ -1250,23 +1276,24 @@ function CutMapSVG({ layout, sheetW, sheetH, cor, maxW, onZoom }) {
         <text x={16} y={H/2} fontSize={10} fill="#333" fontFamily="monospace" fontWeight="600" transform={`rotate(-90,16,${H/2})`} textAnchor="middle">X = {sheetH} mm</text>
       </svg>
 
-      {/* Legenda */}
       <div style={{ background: "#0D1A0D", padding: "8px 14px", display: "flex", gap: 14, flexWrap: "wrap", alignItems: "center" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: "#9CA3AF" }}>
           <div style={{ width: 14, height: 10, background: c.piece, border: "2px solid "+c.stroke, borderRadius: 2 }}/>Peça cortada
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: "#9CA3AF" }}>
-          <div style={{ width: 14, height: 10, background: "#22C55E22", border: "1.5px dashed #22C55E", borderRadius: 2 }}/>
+          <div style={{ width: 14, height: 10, background: "#22C55E20", border: "1.5px dashed #22C55E", borderRadius: 2 }}/>
           <span style={{ color: "#22C55E" }}>Retalho (≥300×300)</span>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: "#9CA3AF" }}>
-          <div style={{ width: 14, height: 10, background: "#EF444430", border: "1.5px dashed #EF4444", borderRadius: 2 }}/>
+          <div style={{ width: 14, height: 10, background: "#EF444428", border: "1.5px dashed #EF4444", borderRadius: 2 }}/>
           <span style={{ color: "#EF4444" }}>Sucata</span>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: "#9CA3AF" }}>
-          <div style={{ width: 20, height: 2, background: "#2563EB", borderRadius: 1 }}/>
-          <span style={{ color: "#93C5FD" }}>Linha de corte</span>
-        </div>
+        {onZoneClick && (
+          <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: "#9CA3AF" }}>
+            <circle r={4} cx={4} cy={4} style={{ display: "inline-block", width: 10, height: 10 }}/>
+            <span style={{ color: T.green }}>● Toque para inserir aqui</span>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -1281,6 +1308,7 @@ function ManualOptimization({ data, setData, navigate, retalhoBase }) {
   const [cor, setCor] = useState(retalhoBase?.cor || "incolor")
   const [entries, setEntries] = useState([])
   const [layout, setLayout] = useState(null)
+  const [selectedZoneId, setSelectedZoneId] = useState(null)
   const [form, setForm] = useState({ y: "", x: "", qtyY: "1", qtyX: "1" })
   const [editId, setEditId] = useState(null)
   const [zoomOpen, setZoomOpen] = useState(false)
@@ -1293,19 +1321,31 @@ function ManualOptimization({ data, setData, navigate, retalhoBase }) {
   // Recalcula layout em tempo real
   useEffect(() => {
     if (!base || !entries.length) { setLayout(null); return }
-    const mapped = entries.map(e => ({
-      ...e,
-      y: int(e.origY) + 4,
-      x: int(e.origX) + 4,
-    }))
-    setLayout(buildCutLayout(mapped, base.width, base.height))
+    const mapped = entries.map(e => ({ ...e, y: int(e.origY) + 4, x: int(e.origX) + 4 }))
+    const result = buildCutLayout(mapped, base.width, base.height)
+    setLayout(result)
+    // Seleciona automaticamente a primeira zona se nenhuma selecionada
+    if (result.availableZones.length > 0 && !selectedZoneId) {
+      setSelectedZoneId(result.availableZones[0].id)
+    }
   }, [entries, base])
+
+  // Inicia com zona 1 selecionada (chapa inteira)
+  useEffect(() => {
+    if (base && !entries.length) setSelectedZoneId(1)
+  }, [base])
 
   const addEntry = () => {
     const Y = int(form.y), X = int(form.x)
     if (!Y || !X) { setError("Preencha Y (largura) e X (altura)."); return }
     setError("")
-    const entry = { id: Date.now() + Math.random(), origY: Y, origX: X, qtyY: int(form.qtyY) || 1, qtyX: int(form.qtyX) || 1 }
+    const entry = {
+      id: Date.now() + Math.random(),
+      origY: Y, origX: X,
+      qtyY: int(form.qtyY) || 1,
+      qtyX: int(form.qtyX) || 1,
+      zoneId: selectedZoneId,
+    }
     if (editId) {
       setEntries(prev => prev.map(e => e.id === editId ? { ...entry, id: e.id } : e))
       setEditId(null)
@@ -1313,21 +1353,22 @@ function ManualOptimization({ data, setData, navigate, retalhoBase }) {
       setEntries(prev => [...prev, entry])
     }
     setForm({ y: "", x: "", qtyY: "1", qtyX: "1" })
+    setSelectedZoneId(null) // será re-selecionado após recalculo
   }
 
-  const removeEntry = id => setEntries(prev => prev.filter(e => e.id !== id))
+  const removeEntry = id => { setEntries(prev => prev.filter(e => e.id !== id)); setSelectedZoneId(null) }
 
   const startEdit = e => {
     setEditId(e.id)
-    setForm({ y: String(e.origY), x: String(e.origX), qtyY: String(e.qtyY || 1), qtyX: String(e.qtyX || 1) })
+    setForm({ y: String(e.origY), x: String(e.origX), qtyY: String(e.qtyY||1), qtyX: String(e.qtyX||1) })
+    setSelectedZoneId(e.zoneId)
   }
 
   const handleFinalize = async () => {
     if (!layout || !base) return
     setSaving(true)
     const id = genId()
-    const totalPecas = entries.reduce((s, e) => s + (int(e.qtyY) || 1) * (int(e.qtyX) || 1), 0)
-    const areaUsada = layout.usedArea
+    const totalPecas = entries.reduce((s, e) => s + (int(e.qtyY)||1) * (int(e.qtyX)||1), 0)
     const novosRet = layout.reusable.map(r => ({
       id: uid(), cor, largura: Math.round(r.w), altura: Math.round(r.h),
       area: parseFloat(area_m2(r.w, r.h)), origem: id, status: "ativo"
@@ -1335,12 +1376,14 @@ function ManualOptimization({ data, setData, navigate, retalhoBase }) {
     const novaOtm = {
       id, cor, chapas_usadas: base.type === "retalho" ? 0 : 1,
       aproveitamento: layout.eff, desperdicio: Math.round((100 - layout.eff) * 10) / 10,
-      pecas_totais: totalPecas, area_total: parseFloat((areaUsada / 1e6).toFixed(2)),
+      pecas_totais: totalPecas,
+      area_total: parseFloat((layout.usedArea / 1e6).toFixed(2)),
       chapa_largura: base.width, chapa_altura: base.height,
     }
     const pSalvar = entries.map(e => ({
-      id: uid(), otimizacao_id: id, largura: int(e.origY), altura: int(e.origX),
-      quantidade: (int(e.qtyY) || 1) * (int(e.qtyX) || 1)
+      id: uid(), otimizacao_id: id,
+      largura: int(e.origY), altura: int(e.origX),
+      quantidade: (int(e.qtyY)||1) * (int(e.qtyX)||1)
     }))
     try {
       if (base.type === "retalho" && base.id) await DB.retalhos.update(base.id, { status: "usado" })
@@ -1361,7 +1404,7 @@ function ManualOptimization({ data, setData, navigate, retalhoBase }) {
   }
 
   const svgW = isMobile ? Math.min(500, (typeof window !== "undefined" ? window.innerWidth : 360) - 32) : 580
-  const totalPecas = entries.reduce((s, e) => s + (int(e.qtyY) || 1) * (int(e.qtyX) || 1), 0)
+  const totalPecas = entries.reduce((s, e) => s + (int(e.qtyY)||1) * (int(e.qtyX)||1), 0)
 
   // ── SELEÇÃO DE BASE ──
   if (step === "select-base") {
@@ -1435,7 +1478,11 @@ function ManualOptimization({ data, setData, navigate, retalhoBase }) {
     )
   }
 
-  // ── TELA DE EDIÇÃO ──
+  // ── EDIÇÃO ──
+  // Zona selecionada para info
+  const allZones = layout ? (layout.availableZones || []) : [{ id: 1, x0: 0, y0: 0, w: base?.width || 0, h: base?.height || 0 }]
+  const selZone = allZones.find(z => z.id === selectedZoneId)
+
   return (
     <div>
       {zoomOpen && layout && (
@@ -1446,10 +1493,9 @@ function ManualOptimization({ data, setData, navigate, retalhoBase }) {
             </button>
           </div>
           <div style={{ flex: 1, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "0 20px 20px", overflowY: "auto" }}>
-            <div style={{ width: "100%", maxWidth: 1100 }}>
-              <CutMapSVG layout={layout} sheetW={base.width} sheetH={base.height} cor={cor}
-                maxW={Math.min(1100, (typeof window !== "undefined" ? window.innerWidth : 800) - 40)} />
-            </div>
+            <CutMapSVG layout={layout} sheetW={base.width} sheetH={base.height} cor={cor}
+              maxW={Math.min(1100, (typeof window !== "undefined" ? window.innerWidth : 800) - 40)}
+              selectedZoneId={selectedZoneId} onZoneClick={setSelectedZoneId} />
           </div>
         </div>
       )}
@@ -1469,7 +1515,7 @@ function ManualOptimization({ data, setData, navigate, retalhoBase }) {
           </Btn>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 8, textAlign: "center" }}>
-          {[["Base", `${base?.width}×${base?.height}`], ["Área utilizada", layout ? `${(layout.usedArea / 1e6).toFixed(2)} m²` : "0 m²"], ["Aproveit.", layout ? `${layout.eff}%` : "0%"], ["Peças", totalPecas]].map(([l, v]) => (
+          {[["Base", `${base?.width}×${base?.height}`], ["Área utilizada", layout ? `${(layout.usedArea/1e6).toFixed(2)} m²` : "0 m²"], ["Aproveit.", layout ? `${layout.eff}%` : "0%"], ["Peças", totalPecas]].map(([l, v]) => (
             <div key={l}>
               <div style={{ fontSize: 9, color: "#9CA3AF" }}>{l}</div>
               <div style={{ fontSize: 13, fontWeight: 800, color: l === "Aproveit." ? T.green : "#fff" }}>{v}</div>
@@ -1478,39 +1524,49 @@ function ManualOptimization({ data, setData, navigate, retalhoBase }) {
         </div>
       </div>
 
-      {/* Mapa de corte */}
+      {/* Mapa de corte com pontos clicáveis */}
       <div style={{ marginBottom: 14, borderRadius: 10, overflow: "hidden", boxShadow: "0 2px 12px rgba(0,0,0,0.15)" }}>
-        <CutMapSVG layout={layout} sheetW={base.width} sheetH={base.height} cor={cor}
-          maxW={svgW} onZoom={() => setZoomOpen(true)} />
+        <CutMapSVG layout={layout || { pieces: [], reusable: [], waste: [], availableZones: [{ id: 1, x0: 0, y0: 0, w: base?.width||0, h: base?.height||0 }], usedArea: 0, totalArea: (base?.width||0)*(base?.height||0), eff: 0 }}
+          sheetW={base.width} sheetH={base.height} cor={cor}
+          maxW={svgW} onZoom={() => setZoomOpen(true)}
+          selectedZoneId={selectedZoneId} onZoneClick={setSelectedZoneId} />
       </div>
+
+      {/* Info zona selecionada */}
+      {selZone && (
+        <div style={{ background: T.greenLight, borderRadius: 10, padding: "10px 14px", marginBottom: 12, display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ width: 12, height: 12, borderRadius: "50%", background: T.green, flexShrink: 0 }} />
+          <div style={{ fontSize: 13, color: T.greenDark }}>
+            <strong>Zona selecionada:</strong> disponível {Math.round(selZone.w)}×{Math.round(selZone.h)} mm · posição Y={Math.round(selZone.x0)}, X={Math.round(selZone.y0)}
+          </div>
+        </div>
+      )}
 
       {/* Formulário */}
       <div style={{ background: T.card, borderRadius: 16, padding: 18, marginBottom: 14, boxShadow: "0 1px 4px rgba(0,0,0,0.07)" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
           <div style={{ fontSize: 14, fontWeight: 700 }}>{editId ? "Editar peça" : "Adicionar peça"}</div>
-          {editId && <button onClick={() => { setEditId(null); setForm({ y: "", x: "", qtyY: "1", qtyX: "1" }) }} style={{ background: "none", border: "none", cursor: "pointer", color: T.red, fontSize: 12, fontWeight: 600 }}>Cancelar edição</button>}
+          {editId && <button onClick={() => { setEditId(null); setForm({ y: "", x: "", qtyY: "1", qtyX: "1" }) }} style={{ background: "none", border: "none", cursor: "pointer", color: T.red, fontSize: 12, fontWeight: 600 }}>Cancelar</button>}
         </div>
 
-        {/* Y e X — Y primeiro */}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>
-          {[["y", "Y — Largura (mm)"], ["x", "X — Altura (mm)"]].map(([k, label]) => (
+          {[["y", "Y — Largura (mm)"], ["x", "X — Altura (mm)"]].map(([k, lbl]) => (
             <div key={k}>
-              <div style={{ fontSize: 11, fontWeight: 600, color: T.textMid, marginBottom: 6 }}>{label}</div>
+              <div style={{ fontSize: 11, fontWeight: 600, color: T.textMid, marginBottom: 6 }}>{lbl}</div>
               <input type="number" value={form[k]} onChange={e => setForm(f => ({ ...f, [k]: e.target.value }))}
                 style={{ width: "100%", padding: "11px 12px", borderRadius: 8, border: "1.5px solid " + T.border, fontSize: 15, outline: "none", boxSizing: "border-box", background: "#F9FAFB" }} />
             </div>
           ))}
         </div>
 
-        {/* Quantidades */}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>
           <div>
-            <div style={{ fontSize: 11, fontWeight: 600, color: T.textMid, marginBottom: 4 }}>Qtd Y <span style={{ color: T.amber, fontSize: 10 }}>→ cresce para o lado</span></div>
+            <div style={{ fontSize: 11, fontWeight: 600, color: T.textMid, marginBottom: 4 }}>Qtd Y <span style={{ color: T.amber, fontSize: 10 }}>→ para o lado</span></div>
             <input type="number" value={form.qtyY} onChange={e => setForm(f => ({ ...f, qtyY: e.target.value }))} min={1} placeholder="1"
               style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1.5px solid " + T.border, fontSize: 14, outline: "none", boxSizing: "border-box", background: "#F9FAFB" }} />
           </div>
           <div>
-            <div style={{ fontSize: 11, fontWeight: 600, color: T.textMid, marginBottom: 4 }}>Qtd X <span style={{ color: T.green, fontSize: 10 }}>↑ cresce para cima</span></div>
+            <div style={{ fontSize: 11, fontWeight: 600, color: T.textMid, marginBottom: 4 }}>Qtd X <span style={{ color: T.green, fontSize: 10 }}>↑ para cima</span></div>
             <input type="number" value={form.qtyX} onChange={e => setForm(f => ({ ...f, qtyX: e.target.value }))} min={1} placeholder="1"
               style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1.5px solid " + T.border, fontSize: 14, outline: "none", boxSizing: "border-box", background: "#F9FAFB" }} />
           </div>
@@ -1518,7 +1574,13 @@ function ManualOptimization({ data, setData, navigate, retalhoBase }) {
 
         {form.y && form.x && (
           <div style={{ background: T.greenLight, borderRadius: 8, padding: "8px 12px", marginBottom: 12, fontSize: 12, color: T.greenDark }}>
-            ✓ Corte: Y={int(form.y) + 4}×X={int(form.x) + 4} mm (+4mm) · {int(form.qtyY) || 1}×Y por {int(form.qtyX) || 1}×X = <strong>{(int(form.qtyY) || 1) * (int(form.qtyX) || 1)} peças</strong>
+            ✓ Corte: Y={int(form.y)+4}×X={int(form.x)+4} mm (+4mm) · {int(form.qtyY)||1}×Y · {int(form.qtyX)||1}×X = <strong>{(int(form.qtyY)||1)*(int(form.qtyX)||1)} peças</strong>
+          </div>
+        )}
+
+        {!selectedZoneId && (
+          <div style={{ background: T.amberLight, borderRadius: 8, padding: "8px 12px", marginBottom: 12, fontSize: 12, color: "#92400E" }}>
+            ⚫ Toque num ponto da chapa para escolher onde inserir a peça
           </div>
         )}
 
