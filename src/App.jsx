@@ -331,6 +331,62 @@ function Btn({children,onClick,variant,size,fullWidth,icon,disabled,style}){
 // ══════════════════════════════════════════════════════
 // DASHBOARD
 // ══════════════════════════════════════════════════════
+// Modal de escolha do tipo de otimização
+function OptModal({ navigate }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <>
+      <button onClick={() => setOpen(true)}
+        style={{ marginTop: 16, background: T.green, color: "#fff", border: "none", borderRadius: 12, padding: "12px 22px", fontSize: 15, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", gap: 8 }}>
+        <Plus size={18} /> Nova Otimização
+      </button>
+
+      {open && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 300, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "flex-end", justifyContent: "center" }}
+          onClick={() => setOpen(false)}>
+          <div style={{ background: T.card, borderRadius: "20px 20px 0 0", padding: "28px 24px 40px", width: "100%", maxWidth: 560 }}
+            onClick={e => e.stopPropagation()}>
+            <div style={{ width: 40, height: 4, background: T.border, borderRadius: 2, margin: "0 auto 24px" }} />
+            <div style={{ fontSize: 18, fontWeight: 800, marginBottom: 6 }}>Nova Otimização</div>
+            <div style={{ fontSize: 13, color: T.textMuted, marginBottom: 24 }}>Escolha o tipo de otimização</div>
+
+            {/* Automática */}
+            <button onClick={() => { setOpen(false); navigate("new-opt") }}
+              style={{ width: "100%", background: T.green, color: "#fff", border: "none", borderRadius: 14, padding: "18px 20px", marginBottom: 12, cursor: "pointer", textAlign: "left", display: "flex", alignItems: "center", gap: 16 }}>
+              <div style={{ width: 44, height: 44, borderRadius: 12, background: "rgba(255,255,255,0.2)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                <Zap size={22} color="#fff" />
+              </div>
+              <div>
+                <div style={{ fontSize: 16, fontWeight: 800 }}>Automática</div>
+                <div style={{ fontSize: 12, opacity: 0.85, marginTop: 2 }}>Algoritmo otimiza automaticamente o aproveitamento máximo</div>
+              </div>
+              <ChevronRight size={20} style={{ marginLeft: "auto", opacity: 0.7 }} />
+            </button>
+
+            {/* Manual */}
+            <button onClick={() => { setOpen(false); navigate("manual-opt") }}
+              style={{ width: "100%", background: "#fff", color: T.text, border: "2px solid " + T.green, borderRadius: 14, padding: "18px 20px", cursor: "pointer", textAlign: "left", display: "flex", alignItems: "center", gap: 16 }}>
+              <div style={{ width: 44, height: 44, borderRadius: 12, background: T.greenLight, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                <Grid size={22} color={T.greenDark} />
+              </div>
+              <div>
+                <div style={{ fontSize: 16, fontWeight: 800, color: T.greenDark }}>Manual Assistida</div>
+                <div style={{ fontSize: 12, color: T.textMuted, marginTop: 2 }}>Operador define o posicionamento com assistência do sistema</div>
+              </div>
+              <ChevronRight size={20} color={T.green} style={{ marginLeft: "auto" }} />
+            </button>
+
+            <button onClick={() => setOpen(false)}
+              style={{ width: "100%", background: "none", border: "none", marginTop: 18, cursor: "pointer", fontSize: 14, color: T.textMuted, fontWeight: 600 }}>
+              Cancelar
+            </button>
+          </div>
+        </div>
+      )}
+    </>
+  )
+}
+
 function Dashboard({data,navigate}){
   const[filter,setFilter]=useState("semanal")
   const totalChapas=data.chapas.reduce((s,c)=>s+c.quantidade,0)
@@ -357,10 +413,7 @@ function Dashboard({data,navigate}){
       <div style={{background:T.dark,borderRadius:18,padding:"22px 24px"}}>
         <div style={{color:"#9CA3AF",fontSize:13,marginBottom:4}}>Resumo operacional em tempo real</div>
         <div style={{color:"#fff",fontSize:24,fontWeight:800}}>Bem-vindo, <span style={{color:T.green}}>Operador</span></div>
-        <div style={{display:"flex",gap:10,marginTop:16,flexWrap:"wrap"}}>
-          <Btn onClick={()=>navigate("new-opt")} size="md" icon={<Plus size={16}/>}>Nova Otimização</Btn>
-          <Btn onClick={()=>navigate("manual-opt")} variant="secondary" size="md" icon={<Grid size={16}/>}>Manual Assistida</Btn>
-        </div>
+        <OptModal navigate={navigate} />
       </div>
       <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:14}}>
         <StatCard icon={<Package size={18}/>} label="Chapas em estoque" value={totalChapas} sub="total no estoque" accent={T.green}/>
