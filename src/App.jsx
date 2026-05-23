@@ -1122,13 +1122,28 @@ function CutMapSVG({ layout, sheetW, sheetH, cor, maxW, onZoom }) {
           )
         })}
 
-        {/* Linhas de corte borda a borda 🔵 */}
-        {layout.pieces.map((p, i) => (
-          <g key={"cut"+i}>
-            <line x1={0} y1={sy(p.posX+p.h)} x2={W} y2={sy(p.posX+p.h)} stroke="#2563EB" strokeWidth={1} strokeDasharray="8 4" opacity={0.55}/>
-            <line x1={sx(p.posY+p.w)} y1={0} x2={sx(p.posY+p.w)} y2={H} stroke="#2563EB" strokeWidth={1} strokeDasharray="8 4" opacity={0.55}/>
-          </g>
-        ))}
+        {/* Linhas de corte reais — apenas cortes que existem de borda a borda */}
+        {(()=>{
+          // Coleta cortes horizontais únicos (topo de cada grupo de peças na mesma altura)
+          const hCuts=new Set()
+          const vCuts=new Set()
+          layout.pieces.forEach(p=>{
+            // Linha horizontal no topo da peça — só se não houver peça logo acima
+            const topY=p.posX+p.h
+            const hasAbove=layout.pieces.some(o=>Math.abs(o.posX-topY)<2&&o.posY<p.posY+p.w&&o.posY+o.w>p.posY)
+            if(!hasAbove&&topY<sheetH-2)hCuts.add(Math.round(topY))
+            // Linha vertical à direita da peça — só se não houver peça logo à direita na mesma faixa vertical
+            const rightX=p.posY+p.w
+            const hasRight=layout.pieces.some(o=>Math.abs(o.posY-rightX)<2&&o.posX<p.posX+p.h&&o.posX+o.h>p.posX)
+            if(!hasRight&&rightX<sheetW-2)vCuts.add(Math.round(rightX))
+          })
+          return(
+            <g>
+              {[...hCuts].map(y=><line key={"hc"+y} x1={0} y1={sy(y)} x2={W} y2={sy(y)} stroke="#2563EB" strokeWidth={1.5} strokeDasharray="10 5" opacity={0.7}/>)}
+              {[...vCuts].map(x=><line key={"vc"+x} x1={sx(x)} y1={0} x2={sx(x)} y2={H} stroke="#2563EB" strokeWidth={1.5} strokeDasharray="10 5" opacity={0.7}/>)}
+            </g>
+          )
+        })()}
 
         {/* Peças 🟦/🟩/⬛ */}
         {layout.pieces.map((p, i) => {
