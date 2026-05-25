@@ -1025,7 +1025,6 @@ const SCRAP_MIN = 300
 // ══════════════════════════════════════════════════════════════
 // MOTOR GUILLOTINE — pontos clicáveis, sem linhas em chapa vazia
 // ══════════════════════════════════════════════════════════════
-const SCRAP_MIN = 300
 
 function buildCutLayout(entries, sheetW, sheetH) {
   // zones: { id, x0, y0, w, h } — zonas disponíveis para inserção
