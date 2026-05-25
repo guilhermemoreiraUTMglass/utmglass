@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef, useCallback } from "react"
+import ProjectsScreen from "./Projects.jsx"
 import { supabase } from "./supabase.js"
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from "recharts"
 import {
   Home, Plus, Layers, Scissors, Clock, Bell, ChevronRight, Trash2,
   Check, RefreshCw, ArrowLeft, AlertTriangle, X, Zap, TrendingUp,
   Package, Info, CheckCircle, ChevronLeft, RotateCcw, Eye, BarChart2,
-  ZoomIn, Search, Edit2, Maximize2, Grid,
+  ZoomIn, Search, Edit2, Maximize2, Grid, FolderOpen,
 } from "lucide-react"
 
 // ══════════════════════════════════════════════════════
@@ -1775,6 +1776,7 @@ export default function App(){
     {id:"dashboard",icon:<Home size={20}/>,label:"Dashboard"},
     {id:"new-opt",icon:<Plus size={20}/>,label:"Nova Otimização"},
     {id:"manual-opt",icon:<Grid size={20}/>,label:"Manual"},
+    {id:"projects",icon:<FolderOpen size={20}/>,label:"Projetos"},
     {id:"stock",icon:<Layers size={20}/>,label:"Estoque"},
     {id:"scraps",icon:<Scissors size={20}/>,label:"Retalhos"},
     {id:"history",icon:<Clock size={20}/>,label:"Histórico"},
@@ -1811,6 +1813,7 @@ export default function App(){
     if(screen==="manual-opt")return<ManualOptimization {...props} retalhoBase={screenParams?.retalhoBase||null}/>
     if(screen==="scraps")return<ScrapsScreen {...props}/>
     if(screen==="history")return<HistoryScreen {...props} onReutilizar={handleReutilizar}/>
+    if(screen==="projects")return<ProjectsScreen/>
     return<Dashboard {...props}/>
   }
 
