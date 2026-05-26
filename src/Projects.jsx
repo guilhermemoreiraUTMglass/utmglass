@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react"
+import { supabase } from "./supabase.js"
 import {
   ArrowLeft, Plus, Search, X, Check, Trash2, Edit2,
   ChevronRight, Camera, Image, FileText, Clock,
