@@ -389,6 +389,8 @@ function ClientProjects({ client, onBack, onSelectProject }) {
   const [newNome, setNewNome] = useState("")
   const [saving, setSaving] = useState(false)
   const [pieceCounts, setPieceCounts] = useState({})
+  const [projectPieces, setProjectPieces] = useState({})
+  const [projectImages, setProjectImages] = useState({})
 
   useEffect(() => { loadProjects() }, [client.id])
 
@@ -397,12 +399,26 @@ function ClientProjects({ client, onBack, onSelectProject }) {
     try {
       const ps = await PDB.projects.listByClient(client.id)
       setProjects(ps)
-      const counts = {}
+      const counts = {}, pcsMap = {}, imgs = {}
       for (const p of ps) {
-        const { data } = await supabase.from("project_pieces").select("id").eq("project_id", p.id)
-        counts[p.id] = data ? data.length : 0
+        const { data: pcs } = await supabase.from("project_pieces")
+          .select("id, largura_y, altura_x, quantidade")
+          .eq("project_id", p.id)
+          .order("criado_em", { ascending: true })
+        counts[p.id] = pcs ? pcs.length : 0
+        pcsMap[p.id] = pcs || []
+        if (pcs && pcs.length > 0) {
+          const pieceImgs = {}
+          for (const pc of pcs) {
+            const { data: img } = await supabase.from("piece_images").select("data").eq("piece_id", pc.id).limit(1)
+            if (img && img.length > 0) pieceImgs[pc.id] = img[0].data
+          }
+          imgs[p.id] = pieceImgs
+        }
       }
       setPieceCounts(counts)
+      setProjectPieces(pcsMap)
+      setProjectImages(imgs)
     } catch (e) { console.error(e) }
     setLoading(false)
   }
@@ -456,34 +472,87 @@ function ClientProjects({ client, onBack, onSelectProject }) {
           <div style={{ fontSize: 15, fontWeight: 600 }}>Nenhum pedido ainda</div>
         </div>
       ) : (
-        projects.map(p => (
-          <div key={p.id} style={{ background: T.card, borderRadius: 16, padding: "16px 18px", marginBottom: 10, boxShadow: "0 1px 4px rgba(0,0,0,0.07)", border: "1px solid " + T.border }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
-              <div onClick={() => onSelectProject(p)} style={{ flex: 1, cursor: "pointer" }}>
-                <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 4 }}>{p.nome}</div>
-                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                  <StatusBadge status={p.status} />
-                  <span style={{ fontSize: 11, color: T.textMuted }}>{pieceCounts[p.id] || 0} peça(s)</span>
-                  <span style={{ fontSize: 11, color: T.textMuted }}>· {fmt_date(p.atualizado_em)}</span>
+        projects.map(p => {
+          const pcs = projectPieces[p.id] || []
+          const imgs = projectImages[p.id] || {}
+          return (
+            <div key={p.id} style={{ background: T.card, borderRadius: 16, marginBottom: 14, boxShadow: "0 1px 4px rgba(0,0,0,0.07)", border: "1px solid " + T.border, overflow: "hidden" }}>
+              {/* Header do pedido */}
+              <div style={{ padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div onClick={() => onSelectProject(p)} style={{ flex: 1, cursor: "pointer" }}>
+                  <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 4 }}>{p.nome}</div>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <StatusBadge status={p.status} />
+                    <span style={{ fontSize: 11, color: T.textMuted }}>{pieceCounts[p.id] || 0} peça(s) · {fmt_date(p.atualizado_em)}</span>
+                  </div>
+                </div>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button onClick={() => handleToggleStatus(p)}
+                    style={{ background: T.greenLight, border: "none", borderRadius: 8, padding: "5px 9px", cursor: "pointer", fontSize: 11, color: T.greenDark, fontWeight: 600, whiteSpace: "nowrap" }}>
+                    {p.status === "concluido" ? "Reabrir" : "Concluir"}
+                  </button>
+                  <button onClick={() => handleDelete(p.id)}
+                    style={{ background: T.redLight, border: "none", borderRadius: 8, padding: "5px 9px", cursor: "pointer" }}>
+                    <Trash2 size={13} color={T.red} />
+                  </button>
                 </div>
               </div>
-              <div style={{ display: "flex", gap: 6, marginLeft: 8 }}>
-                <button onClick={() => handleToggleStatus(p)}
-                  style={{ background: T.greenLight, border: "none", borderRadius: 8, padding: "6px 10px", cursor: "pointer", fontSize: 11, color: T.greenDark, fontWeight: 600, whiteSpace: "nowrap" }}>
-                  {p.status === "concluido" ? "Reabrir" : "Concluir"}
-                </button>
-                <button onClick={() => handleDelete(p.id)}
-                  style={{ background: T.redLight, border: "none", borderRadius: 8, padding: "6px 10px", cursor: "pointer" }}>
-                  <Trash2 size={13} color={T.red} />
-                </button>
-              </div>
+
+              {/* GALERIA DE PEÇAS */}
+              {pcs.length > 0 && (
+                <div style={{ borderTop: "1px solid " + T.border }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(100px, 1fr))", gap: 1, background: T.border }}>
+                    {pcs.map((pc, idx) => {
+                      const img = imgs[pc.id]
+                      return (
+                        <div key={pc.id} onClick={() => onSelectProject(p)}
+                          style={{ position: "relative", background: T.bg, cursor: "pointer", aspectRatio: "1", overflow: "hidden", display: "flex", flexDirection: "column" }}>
+                          {/* Imagem ou placeholder */}
+                          {img ? (
+                            <img src={img} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+                          ) : (
+                            <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: "#F8FAF8", gap: 4 }}>
+                              <div style={{ width: 36, height: 44, background: T.greenLight, border: "2px solid " + T.green, borderRadius: 4 }} />
+                            </div>
+                          )}
+                          {/* Label com dimensão sobreposta */}
+                          <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, background: "rgba(0,0,0,0.72)", padding: "4px 6px" }}>
+                            <div style={{ fontSize: 10, fontWeight: 800, color: "#fff", fontFamily: "monospace", lineHeight: 1.2 }}>
+                              {pc.largura_y}×{pc.altura_x}
+                            </div>
+                            {pc.quantidade > 1 && (
+                              <div style={{ fontSize: 9, color: T.green, fontWeight: 600 }}>{pc.quantidade}×</div>
+                            )}
+                          </div>
+                          {/* Número da peça */}
+                          <div style={{ position: "absolute", top: 5, left: 5, width: 18, height: 18, borderRadius: "50%", background: T.green, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                            <span style={{ fontSize: 9, fontWeight: 800, color: "#fff" }}>{idx + 1}</span>
+                          </div>
+                        </div>
+                      )
+                    })}
+                    {/* Card de adicionar */}
+                    <div onClick={() => onSelectProject(p)}
+                      style={{ background: T.bg, cursor: "pointer", aspectRatio: "1", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 6 }}>
+                      <Plus size={20} color={T.green} />
+                      <span style={{ fontSize: 10, color: T.green, fontWeight: 700 }}>Editar</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Botão abrir se sem peças */}
+              {pcs.length === 0 && (
+                <div style={{ padding: "0 16px 14px" }}>
+                  <button onClick={() => onSelectProject(p)}
+                    style={{ width: "100%", background: T.bg, border: "1px solid " + T.border, borderRadius: 10, padding: "10px 14px", cursor: "pointer", textAlign: "left", fontSize: 13, color: T.green, fontWeight: 700, display: "flex", alignItems: "center", gap: 6 }}>
+                    <Plus size={14} />Adicionar peças <ChevronRight size={14} style={{ marginLeft: "auto" }} />
+                  </button>
+                </div>
+              )}
             </div>
-            <button onClick={() => onSelectProject(p)}
-              style={{ width: "100%", background: T.bg, border: "1px solid " + T.border, borderRadius: 10, padding: "10px 14px", cursor: "pointer", textAlign: "left", fontSize: 13, color: T.green, fontWeight: 700, display: "flex", alignItems: "center", gap: 6 }}>
-              <Edit2 size={14} />Abrir e editar peças <ChevronRight size={14} style={{ marginLeft: "auto" }} />
-            </button>
-          </div>
-        ))
+          )
+        })
       )}
 
       {showNew && (
