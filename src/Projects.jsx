@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef } from "react"
-import { supabase } from "./supabase.js"
 import {
   ArrowLeft, Plus, Search, X, Check, Trash2, Edit2,
   ChevronRight, Camera, Image, FileText, Clock,
@@ -576,7 +575,7 @@ function ClientProjects({ client, onBack, onSelectProject }) {
 // ══════════════════════════════════════════════════════
 // TELA: PEÇAS DO PROJETO
 // ══════════════════════════════════════════════════════
-function ProjectDetail({ project, client, onBack }) {
+function ProjectDetail({ project, client, onBack, onOpenGallery }) {
   const [pieces, setPieces] = useState([])
   const [images, setImages] = useState({}) // pieceId -> [img]
   const [loading, setLoading] = useState(true)
@@ -678,6 +677,21 @@ function ProjectDetail({ project, client, onBack }) {
         </div>
         <StatusBadge status={project.status} />
       </div>
+
+      {/* Botão Galeria de Produção */}
+      {pieces.length > 0 && (
+        <button onClick={onOpenGallery}
+          style={{ width: "100%", background: "#050505", border: "2px solid " + T.green, borderRadius: 14, padding: "14px 20px", cursor: "pointer", display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
+          <div style={{ width: 40, height: 40, borderRadius: 10, background: T.greenLight, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+            <span style={{ fontSize: 20 }}>🖼</span>
+          </div>
+          <div style={{ textAlign: "left" }}>
+            <div style={{ fontSize: 15, fontWeight: 800, color: T.green }}>Ver Galeria de Produção</div>
+            <div style={{ fontSize: 12, color: T.textMuted }}>Visualize e marque peças durante o corte</div>
+          </div>
+          <ChevronRight size={18} color={T.green} style={{ marginLeft: "auto" }} />
+        </button>
+      )}
 
       {/* Dica futura integração */}
       <div style={{ background: T.dark, borderRadius: 12, padding: "10px 14px", marginBottom: 18, display: "flex", gap: 10, alignItems: "center" }}>
@@ -803,8 +817,378 @@ function ProjectDetail({ project, client, onBack }) {
 // ══════════════════════════════════════════════════════
 // COMPONENTE PRINCIPAL — Projects
 // ══════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════
+// GALERIA DE PRODUÇÃO
+// ══════════════════════════════════════════════════════
+
+// DB helpers para piece_status
+const PSdb = {
+  async getByProject(projectId) {
+    const { data, error } = await supabase.from("piece_status").select("*").eq("project_id", projectId)
+    if (error) throw error
+    return data || []
+  },
+  async upsert(projectId, pieceId, isCompleted) {
+    const { data: existing } = await supabase.from("piece_status").select("id").eq("piece_id", pieceId).limit(1)
+    if (existing && existing.length > 0) {
+      await supabase.from("piece_status").update({
+        is_completed: isCompleted,
+        completed_at: isCompleted ? Date.now() : null,
+      }).eq("piece_id", pieceId)
+    } else {
+      await supabase.from("piece_status").insert({
+        id: uid(), project_id: projectId, piece_id: pieceId,
+        is_completed: isCompleted, completed_at: isCompleted ? Date.now() : null,
+        completed_by: "Operador", criado_em: Date.now(),
+      })
+    }
+  },
+}
+
+function ProductionGallery({ project, client, onBack }) {
+  const [pieces, setPieces] = useState([])
+  const [images, setImages] = useState({})      // pieceId -> [imgs]
+  const [status, setStatus] = useState({})       // pieceId -> bool
+  const [current, setCurrent] = useState(0)
+  const [loading, setLoading] = useState(true)
+  const [onlyPending, setOnlyPending] = useState(false)
+  const [zoom, setZoom] = useState(1)
+  const [finishing, setFinishing] = useState(false)
+  const isMobile = typeof window !== "undefined" && window.innerWidth < 768
+
+  // Swipe
+  const touchStartX = useRef(0)
+  const touchEndX = useRef(0)
+
+  useEffect(() => { load() }, [project.id])
+
+  const load = async () => {
+    setLoading(true)
+    try {
+      const { data: pcs } = await supabase.from("project_pieces")
+        .select("*").eq("project_id", project.id).order("criado_em", { ascending: true })
+      const allPieces = pcs || []
+      setPieces(allPieces)
+      const imgs = {}, st = {}
+      for (const p of allPieces) {
+        const { data: pi } = await supabase.from("piece_images").select("*").eq("piece_id", p.id)
+        imgs[p.id] = pi || []
+        st[p.id] = false
+      }
+      setImages(imgs)
+      const statuses = await PSdb.getByProject(project.id)
+      statuses.forEach(s => { st[s.piece_id] = s.is_completed })
+      setStatus(st)
+    } catch (e) { console.error(e) }
+    setLoading(false)
+  }
+
+  const visiblePieces = onlyPending ? pieces.filter(p => !status[p.id]) : pieces
+  const safeCurrent = Math.min(current, Math.max(0, visiblePieces.length - 1))
+  const piece = visiblePieces[safeCurrent]
+  const pImgs = piece ? (images[piece.id] || []) : []
+  const completedCount = pieces.filter(p => status[p.id]).length
+  const progress = pieces.length > 0 ? Math.round((completedCount / pieces.length) * 100) : 0
+  const allDone = completedCount === pieces.length && pieces.length > 0
+
+  const goNext = () => { setZoom(1); setCurrent(i => Math.min(i + 1, visiblePieces.length - 1)) }
+  const goPrev = () => { setZoom(1); setCurrent(i => Math.max(i - 1, 0)) }
+
+  const handleTouchStart = e => { touchStartX.current = e.touches[0].clientX }
+  const handleTouchEnd = e => {
+    touchEndX.current = e.changedTouches[0].clientX
+    const diff = touchStartX.current - touchEndX.current
+    if (Math.abs(diff) > 50) { diff > 0 ? goNext() : goPrev() }
+  }
+
+  const toggleStatus = async () => {
+    if (!piece) return
+    const newVal = !status[piece.id]
+    setStatus(prev => ({ ...prev, [piece.id]: newVal }))
+    await PSdb.upsert(project.id, piece.id, newVal)
+    if (newVal && safeCurrent < visiblePieces.length - 1) {
+      setTimeout(() => { setZoom(1); setCurrent(i => i + 1) }, 400)
+    }
+  }
+
+  const handleFinish = async () => {
+    setFinishing(true)
+    try {
+      await supabase.from("projects").update({ status: "concluido", atualizado_em: Date.now() }).eq("id", project.id)
+      alert("Pedido finalizado com sucesso!")
+      onBack()
+    } catch (e) { alert("Erro: " + e.message) }
+    setFinishing(false)
+  }
+
+  if (loading) return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "60vh", flexDirection: "column", gap: 16 }}>
+      <div style={{ fontSize: 20, fontWeight: 700, color: "#fff" }}>Carregando galeria...</div>
+    </div>
+  )
+
+  // ── LAYOUT DESKTOP (3 colunas) ──
+  if (!isMobile) {
+    return (
+      <div style={{ display: "flex", height: "calc(100vh - 72px)", background: "#050505", borderRadius: 16, overflow: "hidden" }}>
+
+        {/* COLUNA ESQUERDA — lista de peças */}
+        <div style={{ width: 280, background: "#0B0B0B", borderRight: "1px solid #2A2A2A", display: "flex", flexDirection: "column", flexShrink: 0 }}>
+          <div style={{ padding: "20px 18px", borderBottom: "1px solid #2A2A2A" }}>
+            <div style={{ fontSize: 13, fontWeight: 800, color: "#fff" }}>Peças do Pedido</div>
+            <div style={{ fontSize: 11, color: "#9CA3AF", marginTop: 2 }}>{pieces.length} peças · {completedCount} concluídas</div>
+            <button onClick={() => setOnlyPending(!onlyPending)}
+              style={{ marginTop: 10, background: onlyPending ? T.green : "#1A1A1A", border: "1px solid " + (onlyPending ? T.green : "#2A2A2A"), borderRadius: 8, padding: "6px 12px", cursor: "pointer", fontSize: 11, color: onlyPending ? "#fff" : "#9CA3AF", fontWeight: 600, width: "100%", textAlign: "left" }}>
+              {onlyPending ? "✓ Só pendentes" : "☐ Só pendentes"}
+            </button>
+          </div>
+          <div style={{ flex: 1, overflowY: "auto", padding: "10px 12px" }}>
+            {visiblePieces.map((p, i) => {
+              const done = status[p.id]
+              const isActive = i === safeCurrent
+              const img = images[p.id]?.[0]
+              return (
+                <div key={p.id} onClick={() => { setCurrent(i); setZoom(1) }}
+                  style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", borderRadius: 12, marginBottom: 6, cursor: "pointer", background: isActive ? "#1A2A1A" : "transparent", border: "1px solid " + (isActive ? T.green : "transparent") }}>
+                  {/* Miniatura */}
+                  <div style={{ width: 44, height: 44, borderRadius: 8, overflow: "hidden", flexShrink: 0, background: "#1A1A1A", border: "1px solid #2A2A2A" }}>
+                    {img ? <img src={img.data} style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}><span style={{ fontSize: 18 }}>🪟</span></div>}
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 12, fontWeight: 800, color: isActive ? T.green : "#fff", fontFamily: "monospace" }}>{p.largura_y}×{p.altura_x}</div>
+                    <div style={{ fontSize: 10, color: "#6B7280" }}>Peça {i + 1} · Qtd {p.quantidade || 1}</div>
+                  </div>
+                  <div style={{ width: 20, height: 20, borderRadius: "50%", background: done ? T.green : "transparent", border: "2px solid " + (done ? T.green : "#4B5563"), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                    {done && <span style={{ fontSize: 10, color: "#fff" }}>✓</span>}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+
+        {/* COLUNA CENTRO — imagem */}
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", background: "#050505" }}>
+          {/* Header centro */}
+          <div style={{ padding: "16px 24px", borderBottom: "1px solid #1A1A1A", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+              <button onClick={onBack} style={{ background: "#1A1A1A", border: "1px solid #2A2A2A", borderRadius: 8, padding: "7px 12px", cursor: "pointer", color: "#9CA3AF", fontSize: 13, display: "flex", alignItems: "center", gap: 6 }}>
+                ← Voltar
+              </button>
+              <div>
+                <div style={{ fontSize: 12, color: "#9CA3AF" }}>{client.nome} · {project.nome}</div>
+                {piece && <div style={{ fontSize: 22, fontWeight: 900, color: T.green, fontFamily: "monospace", letterSpacing: 1 }}>{piece.largura_y} × {piece.altura_x} mm</div>}
+              </div>
+            </div>
+            <div style={{ textAlign: "right" }}>
+              <div style={{ fontSize: 13, color: "#fff", fontWeight: 700 }}>Peça {safeCurrent + 1} de {visiblePieces.length}</div>
+              <div style={{ fontSize: 11, color: "#9CA3AF" }}>{completedCount} de {pieces.length} concluídas</div>
+              {/* Barra progresso */}
+              <div style={{ width: 160, height: 6, background: "#1A1A1A", borderRadius: 3, marginTop: 6, overflow: "hidden" }}>
+                <div style={{ width: progress + "%", height: "100%", background: T.green, borderRadius: 3, transition: "width .3s" }} />
+              </div>
+            </div>
+          </div>
+
+          {/* Imagem */}
+          <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", padding: 24, position: "relative", overflow: "hidden" }}>
+            {pImgs.length > 0 ? (
+              <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <img src={pImgs[0].data} alt=""
+                  style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", borderRadius: 16, transform: `scale(${zoom})`, transition: "transform .2s", cursor: zoom > 1 ? "grab" : "zoom-in" }}
+                  onClick={() => setZoom(z => z >= 3 ? 1 : z + 0.5)} />
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 16, color: "#4B5563" }}>
+                <div style={{ fontSize: 80 }}>🪟</div>
+                <div style={{ fontSize: 20, color: "#6B7280", fontWeight: 600 }}>Sem imagem anexada</div>
+                {piece && <div style={{ fontSize: 32, fontWeight: 900, color: "#fff", fontFamily: "monospace" }}>{piece.largura_y} × {piece.altura_x}</div>}
+              </div>
+            )}
+            {/* Overlay concluída */}
+            {piece && status[piece.id] && (
+              <div style={{ position: "absolute", inset: 0, background: "rgba(34,197,94,0.12)", display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
+                <div style={{ fontSize: 80, opacity: 0.4 }}>✓</div>
+              </div>
+            )}
+            {/* Navegação lateral */}
+            <button onClick={goPrev} disabled={safeCurrent === 0}
+              style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", background: "#1A1A1A", border: "1px solid #2A2A2A", borderRadius: "50%", width: 44, height: 44, cursor: "pointer", fontSize: 18, color: safeCurrent === 0 ? "#2A2A2A" : "#fff", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              ‹
+            </button>
+            <button onClick={goNext} disabled={safeCurrent >= visiblePieces.length - 1}
+              style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", background: "#1A1A1A", border: "1px solid #2A2A2A", borderRadius: "50%", width: 44, height: 44, cursor: "pointer", fontSize: 18, color: safeCurrent >= visiblePieces.length - 1 ? "#2A2A2A" : "#fff", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              ›
+            </button>
+            {/* Zoom controls */}
+            <div style={{ position: "absolute", bottom: 16, right: 16, display: "flex", gap: 8 }}>
+              {[["−", () => setZoom(z => Math.max(1, z - 0.5))], ["+", () => setZoom(z => Math.min(4, z + 0.5))], ["↺", () => setZoom(1)]].map(([label, fn]) => (
+                <button key={label} onClick={fn} style={{ background: "#1A1A1A", border: "1px solid #2A2A2A", borderRadius: 8, width: 36, height: 36, cursor: "pointer", color: "#fff", fontSize: 16, display: "flex", alignItems: "center", justifyContent: "center" }}>{label}</button>
+              ))}
+            </div>
+          </div>
+
+          {/* Ações */}
+          <div style={{ padding: "16px 24px", borderTop: "1px solid #1A1A1A", display: "flex", gap: 12 }}>
+            {allDone ? (
+              <button onClick={handleFinish} disabled={finishing}
+                style={{ flex: 1, background: T.green, border: "none", borderRadius: 14, padding: "16px", cursor: "pointer", fontSize: 16, fontWeight: 800, color: "#fff" }}>
+                {finishing ? "Finalizando..." : "✅ Finalizar Pedido"}
+              </button>
+            ) : (
+              <button onClick={toggleStatus}
+                style={{ flex: 1, background: piece && status[piece.id] ? "#1A2A1A" : T.green, border: "2px solid " + T.green, borderRadius: 14, padding: "16px", cursor: "pointer", fontSize: 16, fontWeight: 800, color: "#fff" }}>
+                {piece && status[piece.id] ? "✓ Peça concluída — Desmarcar" : "Marcar como concluída"}
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* COLUNA DIREITA — informações */}
+        <div style={{ width: 300, background: "#0B0B0B", borderLeft: "1px solid #2A2A2A", padding: "24px 20px", overflowY: "auto" }}>
+          <div style={{ fontSize: 13, fontWeight: 800, color: "#fff", marginBottom: 20 }}>Informações da Peça</div>
+          {piece ? (
+            <>
+              {[["Dimensão Y (largura)", piece.largura_y + " mm"], ["Dimensão X (altura)", piece.altura_x + " mm"], ["Quantidade", piece.quantidade || 1], ["Status", status[piece.id] ? "Concluída ✓" : "Pendente"], ["Observação", piece.observacao || "—"]].map(([l, v]) => (
+                <div key={l} style={{ marginBottom: 16 }}>
+                  <div style={{ fontSize: 10, color: "#6B7280", fontWeight: 600, marginBottom: 4, textTransform: "uppercase", letterSpacing: 0.5 }}>{l}</div>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: l === "Status" ? (status[piece.id] ? T.green : T.amber) : "#fff" }}>{v}</div>
+                </div>
+              ))}
+              <div style={{ height: 1, background: "#2A2A2A", margin: "20px 0" }} />
+              <div style={{ fontSize: 10, color: "#6B7280", fontWeight: 600, marginBottom: 10, textTransform: "uppercase" }}>Imagens ({pImgs.length})</div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {pImgs.map((img, i) => (
+                  <img key={i} src={img.data} style={{ width: 72, height: 72, objectFit: "cover", borderRadius: 10, border: "1px solid #2A2A2A", cursor: "pointer" }} onClick={() => {}} />
+                ))}
+                {pImgs.length === 0 && <div style={{ fontSize: 12, color: "#4B5563" }}>Sem imagens</div>}
+              </div>
+              <div style={{ height: 1, background: "#2A2A2A", margin: "20px 0" }} />
+              <div style={{ fontSize: 10, color: "#6B7280", fontWeight: 600, marginBottom: 10, textTransform: "uppercase" }}>Progresso Geral</div>
+              <div style={{ height: 8, background: "#1A1A1A", borderRadius: 4, overflow: "hidden", marginBottom: 8 }}>
+                <div style={{ width: progress + "%", height: "100%", background: T.green, borderRadius: 4, transition: "width .3s" }} />
+              </div>
+              <div style={{ fontSize: 13, color: "#fff", fontWeight: 700 }}>{completedCount} de {pieces.length} peças ({progress}%)</div>
+            </>
+          ) : <div style={{ color: "#4B5563" }}>Nenhuma peça selecionada</div>}
+        </div>
+      </div>
+    )
+  }
+
+  // ── LAYOUT MOBILE (fullscreen) ──
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "#050505", zIndex: 200, display: "flex", flexDirection: "column" }}
+      onTouchStart={handleTouchStart} onTouchEnd={handleTouchEnd}>
+
+      {/* Header mobile */}
+      <div style={{ background: "#0B0B0B", padding: "12px 16px", borderBottom: "1px solid #1A1A1A", flexShrink: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+          <button onClick={onBack} style={{ background: "none", border: "none", cursor: "pointer", color: "#9CA3AF", fontSize: 13, display: "flex", alignItems: "center", gap: 4 }}>
+            ← Voltar
+          </button>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 11, color: "#9CA3AF" }}>{client.nome} · {project.nome}</div>
+            <div style={{ fontSize: 11, color: "#6B7280" }}>Peça {safeCurrent + 1} de {visiblePieces.length}</div>
+          </div>
+          <button onClick={() => setOnlyPending(!onlyPending)}
+            style={{ background: onlyPending ? T.green : "#1A1A1A", border: "none", borderRadius: 6, padding: "5px 8px", cursor: "pointer", fontSize: 10, color: "#fff", fontWeight: 700 }}>
+            {onlyPending ? "✓ Pend." : "Pend."}
+          </button>
+        </div>
+        {/* Barra de progresso */}
+        <div style={{ height: 4, background: "#1A1A1A", borderRadius: 2, overflow: "hidden", marginBottom: 6 }}>
+          <div style={{ width: progress + "%", height: "100%", background: T.green, borderRadius: 2, transition: "width .3s" }} />
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          {piece && <div style={{ fontSize: 22, fontWeight: 900, color: T.green, fontFamily: "monospace" }}>{piece.largura_y} × {piece.altura_x}</div>}
+          <div style={{ fontSize: 11, color: "#9CA3AF" }}>{completedCount}/{pieces.length} concluídas · {progress}%</div>
+        </div>
+      </div>
+
+      {/* Imagem — área principal */}
+      <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", position: "relative", overflow: "hidden", background: "#050505" }}>
+        {pImgs.length > 0 ? (
+          <img src={pImgs[0].data} alt=""
+            style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", transform: `scale(${zoom})`, transition: "transform .2s", touchAction: "manipulation" }}
+            onClick={() => setZoom(z => z >= 3 ? 1 : z + 0.75)} />
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 12, color: "#4B5563" }}>
+            <div style={{ fontSize: 64 }}>🪟</div>
+            {piece && <div style={{ fontSize: 28, fontWeight: 900, color: "#fff", fontFamily: "monospace" }}>{piece.largura_y} × {piece.altura_x}</div>}
+            <div style={{ fontSize: 13, color: "#6B7280" }}>Sem imagem anexada</div>
+          </div>
+        )}
+        {/* Overlay concluída */}
+        {piece && status[piece.id] && (
+          <div style={{ position: "absolute", inset: 0, background: "rgba(34,197,94,0.1)", display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
+            <div style={{ fontSize: 64, opacity: 0.5 }}>✓</div>
+          </div>
+        )}
+        {/* Botões nav laterais */}
+        <button onClick={goPrev} disabled={safeCurrent === 0}
+          style={{ position: "absolute", left: 8, top: "50%", transform: "translateY(-50%)", background: "rgba(0,0,0,0.6)", border: "none", borderRadius: "50%", width: 40, height: 40, cursor: "pointer", fontSize: 20, color: safeCurrent === 0 ? "#333" : "#fff", display: "flex", alignItems: "center", justifyContent: "center" }}>
+          ‹
+        </button>
+        <button onClick={goNext} disabled={safeCurrent >= visiblePieces.length - 1}
+          style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", background: "rgba(0,0,0,0.6)", border: "none", borderRadius: "50%", width: 40, height: 40, cursor: "pointer", fontSize: 20, color: safeCurrent >= visiblePieces.length - 1 ? "#333" : "#fff", display: "flex", alignItems: "center", justifyContent: "center" }}>
+          ›
+        </button>
+        {/* Zoom */}
+        <div style={{ position: "absolute", bottom: 10, right: 10, display: "flex", gap: 6 }}>
+          {[["−", () => setZoom(z => Math.max(1, z - 0.5))], ["+", () => setZoom(z => Math.min(4, z + 0.5))], ["↺", () => setZoom(1)]].map(([l, fn]) => (
+            <button key={l} onClick={fn} style={{ background: "rgba(0,0,0,0.7)", border: "1px solid #333", borderRadius: 8, width: 34, height: 34, cursor: "pointer", color: "#fff", fontSize: 16, display: "flex", alignItems: "center", justifyContent: "center" }}>{l}</button>
+          ))}
+        </div>
+        {/* Indicadores de página */}
+        <div style={{ position: "absolute", bottom: 10, left: "50%", transform: "translateX(-50%)", display: "flex", gap: 5 }}>
+          {visiblePieces.slice(Math.max(0, safeCurrent - 2), safeCurrent + 3).map((_, i) => {
+            const realIdx = Math.max(0, safeCurrent - 2) + i
+            return <div key={realIdx} style={{ width: realIdx === safeCurrent ? 18 : 6, height: 6, borderRadius: 3, background: realIdx === safeCurrent ? T.green : "#333", transition: "all .2s" }} />
+          })}
+        </div>
+      </div>
+
+      {/* Botão inferior */}
+      <div style={{ padding: "12px 16px 24px", background: "#0B0B0B", borderTop: "1px solid #1A1A1A", flexShrink: 0 }}>
+        {allDone ? (
+          <button onClick={handleFinish} disabled={finishing}
+            style={{ width: "100%", background: T.green, border: "none", borderRadius: 16, padding: "18px", cursor: "pointer", fontSize: 18, fontWeight: 900, color: "#fff" }}>
+            {finishing ? "Finalizando..." : "✅ Finalizar Pedido"}
+          </button>
+        ) : (
+          <button onClick={toggleStatus}
+            style={{ width: "100%", background: piece && status[piece.id] ? "transparent" : T.green, border: "3px solid " + T.green, borderRadius: 16, padding: "18px", cursor: "pointer", fontSize: 17, fontWeight: 900, color: "#fff", transition: "all .2s" }}>
+            {piece && status[piece.id] ? "✓ Concluída — Toque para desmarcar" : "Marcar como concluída"}
+          </button>
+        )}
+        {/* Mini lista de peças */}
+        <div style={{ display: "flex", gap: 6, marginTop: 12, overflowX: "auto", paddingBottom: 4 }}>
+          {visiblePieces.map((p, i) => (
+            <button key={p.id} onClick={() => { setCurrent(i); setZoom(1) }}
+              style={{ flexShrink: 0, width: 44, height: 44, borderRadius: 10, border: "2px solid " + (i === safeCurrent ? T.green : status[p.id] ? "#1A3A1A" : "#2A2A2A"), background: i === safeCurrent ? "#1A2A1A" : status[p.id] ? "#0D1A0D" : "#111", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", position: "relative" }}>
+              {images[p.id]?.[0] ? (
+                <img src={images[p.id][0].data} style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: 8 }} />
+              ) : (
+                <span style={{ fontSize: 9, color: i === safeCurrent ? T.green : "#6B7280", fontWeight: 700, fontFamily: "monospace" }}>{p.largura_y}×{p.altura_x}</span>
+              )}
+              {status[p.id] && (
+                <div style={{ position: "absolute", inset: 0, background: "rgba(34,197,94,0.3)", borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <span style={{ fontSize: 14, color: T.green }}>✓</span>
+                </div>
+              )}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ══════════════════════════════════════════════════════
+// TELA PRINCIPAL — Projects
+// ══════════════════════════════════════════════════════
 export default function ProjectsScreen() {
-  // screen: "clients" | "projects" | "detail"
   const [screen, setScreen] = useState("clients")
   const [selectedClient, setSelectedClient] = useState(null)
   const [selectedProject, setSelectedProject] = useState(null)
@@ -812,7 +1196,6 @@ export default function ProjectsScreen() {
   const handleSelectClient = (client, goToProjectId = null) => {
     setSelectedClient(client)
     if (goToProjectId) {
-      // Vai direto para o projeto específico
       setSelectedProject({ id: goToProjectId })
       setScreen("detail")
     } else {
@@ -848,6 +1231,15 @@ export default function ProjectsScreen() {
           project={selectedProject}
           client={selectedClient}
           onBack={() => setScreen("projects")}
+          onOpenGallery={() => setScreen("gallery")}
+        />
+      )}
+
+      {screen === "gallery" && selectedProject && selectedClient && (
+        <ProductionGallery
+          project={selectedProject}
+          client={selectedClient}
+          onBack={() => setScreen("detail")}
         />
       )}
     </div>
