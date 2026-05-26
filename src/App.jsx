@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react"
 import ProjectsScreen from "./Projects.jsx"
+import Projetar from "./Projetar.jsx"
 import Ferragens from "./Ferragens.jsx"
 import { supabase } from "./supabase.js"
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from "recharts"
@@ -7,7 +8,7 @@ import {
   Home, Plus, Layers, Scissors, Clock, Bell, ChevronRight, Trash2,
   Check, RefreshCw, ArrowLeft, AlertTriangle, X, Zap, TrendingUp,
   Package, Info, CheckCircle, ChevronLeft, RotateCcw, Eye, BarChart2,
-  ZoomIn, Search, Edit2, Maximize2, Grid, FolderOpen, DollarSign, Wrench,
+  ZoomIn, Search, Edit2, Maximize2, Grid, FolderOpen, DollarSign, Wrench, PenTool,
 } from "lucide-react"
 
 // ══════════════════════════════════════════════════════
@@ -1777,6 +1778,7 @@ export default function App(){
     {id:"new-opt",icon:<Plus size={20}/>,label:"Nova Otimização"},
     {id:"manual-opt",icon:<Grid size={20}/>,label:"Manual"},
     {id:"projects",icon:<FolderOpen size={20}/>,label:"Projetos"},
+    {id:"projetar",icon:<PenTool size={20}/>,label:"Projetar"},
     {id:"orcamento",icon:<DollarSign size={20}/>,label:"Orçamento"},
     {id:"ferragens",icon:<Wrench size={20}/>,label:"Ferragens"},
     {id:"stock",icon:<Layers size={20}/>,label:"Estoque"},
@@ -1818,6 +1820,7 @@ export default function App(){
     if(screen==="projects")return<ProjectsScreen/>
     if(screen==="orcamento")return<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:"60vh",gap:"12px"}}><div style={{fontSize:"48px"}}>💰</div><div style={{fontSize:"20px",fontWeight:"700",color:"#888"}}>Orçamento</div><div style={{fontSize:"14px",color:"#555"}}>Em breve</div></div>
     if(screen==="ferragens")return<Ferragens isMobile={isMobile}/>
+    if(screen==="projetar")return<Projetar isMobile={isMobile}/>
     return<Dashboard {...props}/>
   }
 
