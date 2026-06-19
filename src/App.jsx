@@ -115,6 +115,26 @@ function packOneSheet(pieces,W,H){
   return{placed,notPlaced,freeRects:free}
 }
 
+// ── Motor aprimorado: testa múltiplas estratégias e retorna o melhor resultado ──
+function packOneSheetBest(pieces,W,H){
+  const score=r=>r.placed.reduce((s,p)=>s+p.pw*p.ph,0)*1000+r.placed.length
+  const byArea=[...pieces].sort((a,b)=>b.w*b.h-a.w*a.h)
+  const byLong=[...pieces].sort((a,b)=>Math.max(b.w,b.h)-Math.max(a.w,a.h))
+  const byPerim=[...pieces].sort((a,b)=>(b.w+b.h)-(a.w+a.h))
+  const byW=[...pieces].sort((a,b)=>b.w-a.w)
+  const byH=[...pieces].sort((a,b)=>b.h-a.h)
+  // Tenta girar 90° todas as peças antes de ordenar
+  const rotated=[...pieces].map(p=>({...p,w:p.h,h:p.w,_prerot:true}))
+  const byAreaRot=[...rotated].sort((a,b)=>b.w*b.h-a.w*a.h)
+  const candidates=[byArea,byLong,byPerim,byW,byH,byAreaRot]
+  let best=null
+  for(const order of candidates){
+    const r=packOneSheet(order,W,H)
+    if(!best||score(r)>score(best))best=r
+  }
+  return best
+}
+
 function buildSheet(placed,freeRects,W,H,extra){
   const used=placed.reduce((s,p)=>s+p.pw*p.ph,0)
   const total=W*H
@@ -146,7 +166,7 @@ function runFullOptimization(pecas,chapas,retalhos,cor){
   if(ch){
     let rem=[...toPlace]
     while(rem.length>0){
-      const{placed,notPlaced,freeRects}=packOneSheet(rem,int(ch.largura),int(ch.altura))
+      const{placed,notPlaced,freeRects}=packOneSheetBest(rem,int(ch.largura),int(ch.altura))
       if(!placed.length)break
       results.push(buildSheet(placed,freeRects,int(ch.largura),int(ch.altura),{isRetalho:false}))
       rem=notPlaced
@@ -159,7 +179,7 @@ function runFullOptimization(pecas,chapas,retalhos,cor){
     const rW=int(r.largura),rH=int(r.altura)
     const cands=toPlace.filter(p=>(p.w<=rW&&p.h<=rH)||(p.h<=rW&&p.w<=rH))
     if(!cands.length)continue
-    const{placed,notPlaced,freeRects}=packOneSheet(cands,rW,rH)
+    const{placed,notPlaced,freeRects}=packOneSheetBest(cands,rW,rH)
     if(!placed.length)continue
     results.push(buildSheet(placed,freeRects,rW,rH,{isRetalho:true,retalhoId:r.id,retalhoLabel:"Retalho "+rW+"×"+rH}))
     const refs=new Set(placed.map(p=>p.ref))
