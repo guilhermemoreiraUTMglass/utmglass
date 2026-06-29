@@ -75,7 +75,7 @@ const DB={
 // ══════════════════════════════════════════════════════
 // UTILS
 // ══════════════════════════════════════════════════════
-const uid=()=>Math.random().toString(36).slice(2,8).toUpperCase()
+const uid=()=>([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g,c=>(c^crypto.getRandomValues(new Uint8Array(1))[0]&15>>c/4).toString(16))
 const genId=()=>"#OTM-"+uid()
 const area_m2=(w,h)=>((w*h)/1e6).toFixed(2)
 const int=v=>parseInt(v,10)||0
