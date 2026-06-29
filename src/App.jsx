@@ -83,53 +83,85 @@ const fmt_date=ts=>new Date(ts).toLocaleString("pt-BR",{day:"2-digit",month:"2-d
 const isToday=ts=>new Date(ts).toDateString()===new Date().toDateString()
 
 // ══════════════════════════════════════════════════════
-// MAXRECTS
+// MOTOR GUILHOTINA REAL — corte borda a borda obrigatório
+// Cada corte divide um espaço em dois ao longo de toda a extensão
+// Rotação automática de 0° e 90° para maximizar aproveitamento
 // ══════════════════════════════════════════════════════
-function rectsOverlap(ax,ay,aw,ah,bx,by,bw,bh){return!(ax>=bx+bw||ax+aw<=bx||ay>=by+bh||ay+ah<=by)}
-function isContained(i,o){return o.x<=i.x&&o.y<=i.y&&o.x+o.w>=i.x+i.w&&o.y+o.h>=i.y+i.h}
 
-function packOneSheet(pieces,W,H){
-  let free=[{x:0,y:0,w:W,h:H}]
+function guillotineOneSheet(pieces,W,H){
+  // bins = espaços retangulares disponíveis para corte
+  // cada bin só pode ser dividido por um corte reto borda a borda
+  let bins=[{x:0,y:0,w:W,h:H}]
   const placed=[],notPlaced=[]
+
   for(const p of pieces){
     const pw=int(p.w),ph=int(p.h)
     if(!pw||!ph)continue
-    let b1=Infinity,b2=Infinity,bRect=null,bRot=false
-    for(const r of free){
-      if(pw<=r.w&&ph<=r.h){const s1=Math.min(r.w-pw,r.h-ph),s2=Math.max(r.w-pw,r.h-ph);if(s1<b1||(s1===b1&&s2<b2)){b1=s1;b2=s2;bRect=r;bRot=false}}
-      if(ph<=r.w&&pw<=r.h){const s1=Math.min(r.w-ph,r.h-pw),s2=Math.max(r.w-ph,r.h-pw);if(s1<b1||(s1===b1&&s2<b2)){b1=s1;b2=s2;bRect=r;bRot=true}}
+
+    // Encontra o melhor bin: Best Short Side Fit com rotação
+    let bestIdx=-1,bestRot=false,bestScore=Infinity
+    for(let i=0;i<bins.length;i++){
+      const b=bins[i]
+      // Orientação original
+      if(pw<=b.w&&ph<=b.h){
+        const s=Math.min(b.w-pw,b.h-ph)
+        if(s<bestScore){bestScore=s;bestIdx=i;bestRot=false}
+      }
+      // Rotação 90°
+      if(ph<=b.w&&pw<=b.h){
+        const s=Math.min(b.w-ph,b.h-pw)
+        if(s<bestScore){bestScore=s;bestIdx=i;bestRot=true}
+      }
     }
-    if(!bRect){notPlaced.push(p);continue}
-    const fw=bRot?ph:pw,fh=bRot?pw:ph,px=bRect.x,py=bRect.y
-    placed.push({x:px,y:py,pw:fw,ph:fh,rotated:bRot,ref:p})
-    const nr=[]
-    for(const r of free){
-      if(!rectsOverlap(px,py,fw,fh,r.x,r.y,r.w,r.h)){nr.push(r);continue}
-      if(r.x<px)nr.push({x:r.x,y:r.y,w:px-r.x,h:r.h})
-      if(r.x+r.w>px+fw)nr.push({x:px+fw,y:r.y,w:r.x+r.w-px-fw,h:r.h})
-      if(r.y<py)nr.push({x:r.x,y:r.y,w:r.w,h:py-r.y})
-      if(r.y+r.h>py+fh)nr.push({x:r.x,y:py+fh,w:r.w,h:r.y+r.h-py-fh})
-    }
-    free=nr.filter((r,i)=>r.w>0&&r.h>0&&!nr.some((o,j)=>i!==j&&isContained(r,o)))
+
+    if(bestIdx===-1){notPlaced.push(p);continue}
+
+    const bin=bins[bestIdx]
+    const fw=bestRot?ph:pw
+    const fh=bestRot?pw:ph
+
+    placed.push({x:bin.x,y:bin.y,pw:fw,ph:fh,rotated:bestRot,ref:p})
+    bins.splice(bestIdx,1)
+
+    const rW=bin.w-fw  // espaço restante à direita
+    const rH=bin.h-fh  // espaço restante abaixo
+
+    // Dois tipos de divisão guilhotina (um corte borda a borda):
+    // Tipo H: corte horizontal pela base da peça → bin abaixo (largura total) + bin direito (altura da peça)
+    // Tipo V: corte vertical pela direita da peça → bin direito (altura total) + bin abaixo (largura da peça)
+    const hBins=[]
+    if(rH>0)hBins.push({x:bin.x,y:bin.y+fh,w:bin.w,h:rH})      // abaixo, largura total do bin
+    if(rW>0)hBins.push({x:bin.x+fw,y:bin.y,w:rW,h:fh})           // direito, altura da peça
+
+    const vBins=[]
+    if(rW>0)vBins.push({x:bin.x+fw,y:bin.y,w:rW,h:bin.h})        // direito, altura total do bin
+    if(rH>0)vBins.push({x:bin.x,y:bin.y+fh,w:fw,h:rH})           // abaixo, largura da peça
+
+    // Escolhe a divisão que preserva o maior espaço livre (melhor para próximas peças)
+    const maxH=hBins.length?Math.max(...hBins.map(b=>b.w*b.h)):0
+    const maxV=vBins.length?Math.max(...vBins.map(b=>b.w*b.h)):0
+    bins.push(...(maxH>=maxV?hBins:vBins))
+
+    // Ordena bins: maiores primeiro para sempre tentar melhor encaixe
+    bins.sort((a,b)=>b.w*b.h-a.w*a.h)
   }
-  return{placed,notPlaced,freeRects:free}
+  return{placed,notPlaced,freeRects:bins}
 }
 
-// ── Motor aprimorado: testa múltiplas estratégias e retorna o melhor resultado ──
+// Testa 6 ordenações diferentes, retorna a que aproveita mais a chapa
 function packOneSheetBest(pieces,W,H){
-  const score=r=>r.placed.reduce((s,p)=>s+p.pw*p.ph,0)*1000+r.placed.length
-  const byArea=[...pieces].sort((a,b)=>b.w*b.h-a.w*a.h)
-  const byLong=[...pieces].sort((a,b)=>Math.max(b.w,b.h)-Math.max(a.w,a.h))
-  const byPerim=[...pieces].sort((a,b)=>(b.w+b.h)-(a.w+a.h))
-  const byW=[...pieces].sort((a,b)=>b.w-a.w)
-  const byH=[...pieces].sort((a,b)=>b.h-a.h)
-  // Tenta girar 90° todas as peças antes de ordenar
-  const rotated=[...pieces].map(p=>({...p,w:p.h,h:p.w,_prerot:true}))
-  const byAreaRot=[...rotated].sort((a,b)=>b.w*b.h-a.w*a.h)
-  const candidates=[byArea,byLong,byPerim,byW,byH,byAreaRot]
+  const score=r=>r.placed.reduce((s,p)=>s+p.pw*p.ph,0)
+  const strategies=[
+    [...pieces].sort((a,b)=>b.w*b.h-a.w*a.h),                        // maior área
+    [...pieces].sort((a,b)=>Math.max(b.w,b.h)-Math.max(a.w,a.h)),    // lado mais longo
+    [...pieces].sort((a,b)=>(b.w+b.h)-(a.w+a.h)),                    // maior perímetro
+    [...pieces].sort((a,b)=>b.w-a.w),                                  // mais larga
+    [...pieces].sort((a,b)=>b.h-a.h),                                  // mais alta
+    [...pieces].sort((a,b)=>Math.min(b.w,b.h)-Math.min(a.w,a.h)),    // menor lado maior
+  ]
   let best=null
-  for(const order of candidates){
-    const r=packOneSheet(order,W,H)
+  for(const order of strategies){
+    const r=guillotineOneSheet(order,W,H)
     if(!best||score(r)>score(best))best=r
   }
   return best
